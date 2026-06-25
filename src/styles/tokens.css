@@ -1,0 +1,99 @@
+/*
+ * Fretwork design tokens — warm wood "studio" palette.
+ *
+ * Plain CSS (no Tailwind @layer) so consumers don't need Tailwind to use this file.
+ * Override any variable in your own stylesheet to reskin the components. All colors
+ * use HSL channels (no hsl() wrapper) so Tailwind opacity modifiers work seamlessly.
+ *
+ *   import '@fretwork/lib/styles/tokens.css';
+ */
+:root {
+  /* Warm dark UI surface */
+  --charcoal-deep: 24 8% 8%;
+  --charcoal: 24 7% 11%;
+  --charcoal-raised: 24 8% 14%;
+
+  /* Fretboard wood */
+  --rosewood-dark: 18 24% 14%;
+  --rosewood: 18 32% 22%;
+  --rosewood-light: 22 36% 30%;
+
+  /* Hardware */
+  --nickel: 30 10% 78%;
+  --pearl: 32 25% 92%;
+
+  /* Marker degree colors */
+  --degree-root: 36 92% 58%;       /* amber */
+  --degree-third: 8 78% 64%;       /* coral */
+  --degree-fifth: 158 32% 56%;     /* sage */
+  --degree-tone: 36 36% 88%;       /* cream */
+
+  /* shadcn semantic mappings */
+  --background: 24 8% 8%;
+  --foreground: 32 25% 92%;
+  --card: 24 8% 14%;
+  --card-foreground: 32 25% 92%;
+  --popover: 24 8% 11%;
+  --popover-foreground: 32 25% 92%;
+  --primary: 36 92% 58%;
+  --primary-foreground: 24 30% 10%;
+  --secondary: 24 7% 18%;
+  --secondary-foreground: 32 25% 92%;
+  --muted: 24 6% 16%;
+  --muted-foreground: 30 10% 64%;
+  --accent: 24 7% 18%;
+  --accent-foreground: 32 25% 92%;
+  --border: 24 6% 20%;
+  --input: 24 6% 20%;
+  --ring: 36 92% 58%;
+  --radius: 0.625rem;
+}
+
+/* Library-internal utilities used by the components themselves. */
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--border)) transparent;
+}
+
+/*
+ * Left-handed mode: flip the entire SVG horizontally, then counter-flip every
+ * <text> element so labels still read left-to-right. transform-box: fill-box +
+ * transform-origin: center keeps the counter-flip anchored at each text's centroid.
+ */
+.fb-left-handed > svg {
+  transform: scaleX(-1);
+}
+.fb-left-handed > svg text {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: scaleX(-1);
+}
+
+/* Hover affordance on note markers (subtle scale-up). */
+.fb-marker {
+  transition: transform 120ms ease-out, filter 120ms ease-out;
+}
+.fb-marker.fb-clickable {
+  cursor: pointer;
+}
+.fb-marker:hover {
+  transform: scale(1.08);
+  filter: brightness(1.1);
+}
+
+/* Playhead — currently-playing note. Scaled up + animated outer ring. */
+.fb-playhead {
+  transform: scale(1.18);
+  filter: brightness(1.15);
+}
+.fb-playhead-ring {
+  animation: fb-playhead-pulse 220ms ease-out;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+@keyframes fb-playhead-pulse {
+  0%   { opacity: 0.95; transform: scale(0.85); }
+  60%  { opacity: 0.6;  transform: scale(1.05); }
+  100% { opacity: 0.0;  transform: scale(1.20); }
+}
