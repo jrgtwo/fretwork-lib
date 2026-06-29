@@ -6,16 +6,13 @@
  *
  * To use:
  *
- *   import { Fretboard, TopBar, InfoCard, Legend, SettingsDialog } from '@fretwork/lib';
+ *   import { Fretboard } from '@fretwork/lib';
  *   import '@fretwork/lib/styles/tokens.css';
  *
- *   <TopBar />
  *   <Fretboard />
- *   <InfoCard />
- *   <Legend />
  *
  * Tailwind CSS is required in the consumer; ensure your tailwind.config's `content` array
- * includes node_modules/@fretwork/lib/src so the classes are picked up.
+ * includes node_modules/@fretwork/lib/dist so the classes are picked up.
  */
 
 // Music notation / tab import (foundation: types, registry, validator, file guards)
@@ -56,59 +53,32 @@ export type {
 
 // Top-level renderable components
 export { Fretboard, type FretboardProps } from './components/fretboard/Fretboard';
+// Headless data core — the render model the default <Fretboard> consumes; exported
+// so consumers can drive a custom renderer from the same computed state.
+export {
+  useFretboardModel,
+  type FretboardModel,
+  type FretboardModelInput,
+} from './components/fretboard/useFretboardModel';
+// Fretboard SVG layout constants/helpers — for consumers building a custom renderer.
+export {
+  HEADSTOCK_WIDTH,
+  NECK_LENGTH,
+  NECK_X,
+  VIEWBOX_W,
+  VIEWBOX_H,
+  TOP_PAD,
+  STRING_AREA,
+  BOTTOM_PAD,
+  MARKER_R,
+  getStringSpacing,
+  stringY,
+} from './components/fretboard/layout';
 export {
   ChordShapeEditor,
   type ChordShapeEditorProps,
 } from './components/fretboard/ChordShapeEditor';
 export { toggleGripCell } from './components/fretboard/grip-edit';
-export { TopBar } from './components/TopBar';
-export { InfoCard } from './components/InfoCard';
-export { Legend } from './components/Legend';
-export { SettingsDialog } from './components/SettingsDialog';
-
-// Individual fretboard sub-components (for consumers wanting to compose their own layout)
-export { Headstock } from './components/fretboard/Headstock';
-export { FretLines } from './components/fretboard/FretLines';
-export { Strings } from './components/fretboard/Strings';
-export { CapoBar } from './components/fretboard/CapoBar';
-export { NoteMarker } from './components/fretboard/NoteMarker';
-
-// Shared UI primitives (shadcn-style) — useful for consumers building their own controls
-export { Button, type ButtonProps } from './components/ui/button';
-export {
-  Select,
-  SelectGroup,
-  SelectValue,
-  SelectTrigger,
-  SelectContent,
-  SelectItem,
-  SelectLabel,
-} from './components/ui/select';
-export {
-  Dialog,
-  DialogTrigger,
-  DialogContent,
-  DialogHeader,
-  DialogFooter,
-  DialogTitle,
-  DialogDescription,
-  DialogClose,
-} from './components/ui/dialog';
-export { Switch } from './components/ui/switch';
-export { RadioGroup, RadioGroupItem } from './components/ui/radio-group';
-export { Label } from './components/ui/label';
-
-// Individual control components (for consumers wanting their own control surface)
-export { SelectControl } from './components/controls/SelectControl';
-export { ControlGroup } from './components/controls/ControlGroup';
-export { InstrumentSelect } from './components/controls/InstrumentSelect';
-export { ModeSelect } from './components/controls/ModeSelect';
-export { KeySelect } from './components/controls/KeySelect';
-export { TypeSelect } from './components/controls/TypeSelect';
-export { ShapeSelect } from './components/controls/ShapeSelect';
-export { TuningSelect } from './components/controls/TuningSelect';
-export { CapoSelect } from './components/controls/CapoSelect';
-export { LabelsSelect } from './components/controls/LabelsSelect';
 
 // State store + URL helpers
 export { useFretworkStore } from './store/useFretworkStore';
@@ -130,6 +100,12 @@ export {
   intervalLabel,
   degreeNumber,
 } from './lib/theory';
+// Headless theory-info hook (the data behind the former <InfoCard>).
+export {
+  useActiveTheoryInfo,
+  type ActiveTheoryInfo,
+  type ActiveTheoryNote,
+} from './lib/useActiveTheoryInfo';
 export { parseChordSymbol, detectChordName } from './lib/chords';
 export type { ParsedChord } from './lib/chords';
 export {
@@ -446,6 +422,8 @@ export {
   resolveShapeAbsoluteCells,
   getCagedPositionMap,
   getCagedShapeSet,
+  getCagedShapeSetForInput,
+  buildResolveInput,
   SAMPLE_PACKS,
   getSamplePack,
   detectSamplePack,

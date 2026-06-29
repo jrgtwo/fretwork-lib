@@ -1,18 +1,7 @@
-import { useCallback, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { useFretworkStore } from '../../store/useFretworkStore';
-import { getTuning } from '../../lib/tunings';
-import { getInstrument, DEFAULT_INSTRUMENT_ID } from '../../lib/instruments';
-import { getScale } from '../../lib/scales';
-import { getArpeggio } from '../../lib/arpeggios';
-import {
-  buildGrid,
-  computeHighlights,
-  effectiveOpenStrings,
-  fretX,
-} from '../../lib/fretboard';
+import { useCallback, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { fretX } from '../../lib/fretboard';
 import { noteAt } from '../../lib/theory';
 import type { Highlight } from '../../types';
-import type { IntervalSet } from '../../types';
 import { cn } from '../../lib/utils';
 import { FretLines } from './FretLines';
 import { Strings } from './Strings';
@@ -22,10 +11,7 @@ import { NoteMarker } from './NoteMarker';
 import { VIEWBOX_H, VIEWBOX_W, NECK_X, NECK_LENGTH, TOP_PAD, STRING_AREA, getStringSpacing } from './layout';
 import { usePlaybackStore } from '../../playback/usePlaybackStore';
 import { cellsEqual } from '../../playback/types';
-import { usePlayback } from '../../playback/usePlayback';
-import { resolveShapeAbsoluteCells } from '../../playback/patterns/caged';
-import { isCagedShapeId } from '../../playback/patterns/caged-shapes-data';
-import type { ResolveInput } from '../../playback/types';
+import { useFretboardModel } from './useFretboardModel';
 
 // Set of fret numbers that always show a marker in inlayGrid mode: open strings
 // (fret 0) plus all standard inlay positions (3, 5, 7, 9, 12, 15, 17, 19, 21).
@@ -106,183 +92,35 @@ export function Fretboard({
   dimNonHighlighted,
   inlayGrid,
 }: FretboardProps = {}) {
-  const instrumentId = useFretworkStore((s) => s.instrumentId);
-  const mode = useFretworkStore((s) => s.mode);
-  const key = useFretworkStore((s) => s.key);
-  const type = useFretworkStore((s) => s.type);
-  const tuningId = useFretworkStore((s) => s.tuning);
-  const capo = useFretworkStore((s) => s.capo);
-  const labels = useFretworkStore((s) => s.labels);
-  const shapeId = useFretworkStore((s) => s.shapeId);
-  const settings = useFretworkStore((s) => s.settings);
-
-  const instrument = getInstrument(instrumentId) ?? getInstrument(DEFAULT_INSTRUMENT_ID)!;
-  const fretCount = instrument.fretCount;
-  const stringCount = instrument.stringCount;
-
-  const { intervals, effectiveKey } = useMemo(() => {
-    if (mode === 'scales') {
-      const scale = getScale(type);
-      return { intervals: (scale?.intervals ?? [0]) as IntervalSet, effectiveKey: key };
-    }
-    if (mode === 'arpeggios') {
-      const arp = getArpeggio(type);
-      return { intervals: (arp?.intervals ?? [0]) as IntervalSet, effectiveKey: key };
-    }
-    return { intervals: [0] as IntervalSet, effectiveKey: type };
-  }, [mode, key, type]);
-
-  const tuning = getTuning(tuningId)!;
-  const grid = useMemo(() => buildGrid(tuning, capo, fretCount), [tuning, capo, fretCount]);
-  const scaleHighlights = useMemo(
-    () => computeHighlights(grid, effectiveKey, intervals, capo),
-    [grid, effectiveKey, intervals, capo],
-  );
-
-  const effectiveScaleHighlights = useMemo<readonly Highlight[]>(
-    () => highlightsProp ?? scaleHighlights,
-    [highlightsProp, scaleHighlights],
-  );
-
-  const openStrings = useMemo(() => effectiveOpenStrings(tuning, capo), [tuning, capo]);
-
-  // Neutral-grid highlights: one synthetic Highlight per cell, all flagged as 'tone'
-  // so NoteMarker's color resolver yields the neutral color. Note names are computed
-  // from the effective open strings; interval/degree fields are blank because there
-  // is no key. Also used by dimNonHighlighted mode as the base render set.
-  const neutralHighlights = useMemo<Highlight[]>(() => {
-    // inlayGrid alone renders NO static markers — the fretboard's own inlay
-    // dots are the visual guide; only the hovered cell shows a marker (see
-    // the hover-marker render below the main loop).
-    if (!neutralGrid && !dimNonHighlighted) return [];
-    const out: Highlight[] = [];
-    for (let s = 0; s < stringCount; s++) {
-      const openNote = openStrings[s];
-      if (!openNote) continue;
-      for (let f = 0; f <= fretCount; f++) {
-        out.push({
-          stringIndex: s,
-          fret: f,
-          noteName: noteAt(openNote, f),
-          intervalLabel: '',
-          degreeNumber: 0,
-          category: 'tone',
-        });
-      }
-    }
-    return out;
-  }, [neutralGrid, dimNonHighlighted, stringCount, fretCount, openStrings]);
-
-  // Render set: in neutralGrid OR dimNonHighlighted, every cell renders; inlayGrid
-  // renders the sparse set built above; otherwise just the scale-derived highlights.
-  const renderHighlights =
-    neutralGrid ? neutralHighlights : effectiveScaleHighlights;
-
-  // O(1) "is this cell currently rendered?" lookup for the hover-marker logic
-  // below — we suppress the hover marker if the hovered cell is already drawn.
-  const renderedKeys = useMemo<Set<string>>(() => {
-    const s = new Set<string>();
-    for (const h of renderHighlights) s.add(`${h.stringIndex}:${h.fret}`);
-    return s;
-  }, [renderHighlights]);
-
-  // Active CAGED shape — when set, build a Set of (string,fret) keys for fast
-  // lookup so we can split highlights into "in-shape" (full prominence) and
-  // "out-of-shape" (ghosted or hidden, depending on the user's setting). CAGED
-  // filtering is suppressed in neutralGrid mode.
-  const inShapeKeys = useMemo<Set<string> | null>(() => {
-    if (neutralGrid) return null;
-    if (!isCagedShapeId(shapeId)) return null;
-    if (mode !== 'scales' && mode !== 'arpeggios') return null;
-    const input: ResolveInput = {
-      highlights: effectiveScaleHighlights,
-      tuning,
-      key,
-      capo,
-      mode,
-      instrumentId,
-      fretCount,
-      scaleType: mode === 'scales' ? type : undefined,
-      arpeggioType: mode === 'arpeggios' ? type : undefined,
-    };
-    const cells = resolveShapeAbsoluteCells(shapeId, input);
-    if (cells.length === 0) return null;
-    return new Set(cells.map((c) => `${c.stringIndex}:${c.fret}`));
-  }, [neutralGrid, shapeId, mode, effectiveScaleHighlights, tuning, key, capo, instrumentId, fretCount, type]);
-
-  // Playback state — read directly from the store. We DON'T call usePlayback() here
-  // because that's an opinionated hook that drives the singleton from fretwork-store
-  // state; calling it from inside the Fretboard would create a circular setResolveInput
-  // loop. The example app calls usePlayback at a higher level for the wiring.
-  const storePlayheadCell = usePlaybackStore((s) => s.currentPlayheadCell);
-  const isProgramming = usePlaybackStore((s) => s.isProgramming);
-  const customSequence = usePlaybackStore((s) => s.customSequence);
-  const playback = usePlayback();
-
-  // Active-cells set (for the playhead treatment). When the caller passes
-  // `activeCells` we use that (supports chords); otherwise the legacy single-cell
-  // playhead from usePlaybackStore is in effect.
-  const activeCellKeys = useMemo<Set<string> | null>(() => {
-    if (!activeCells) return null;
-    return new Set(activeCells.map((c) => `${c.stringIndex}:${c.fret}`));
-  }, [activeCells]);
-  const playheadCell = activeCells ? null : storePlayheadCell;
-
-  // Activity layer (the "route"): currently-sounding / playhead cells that are
-  // NOT already drawn by the render set above. Without this, a note outside the
-  // displayed scale (e.g. a C# while the scale is C major) plays but never
-  // highlights — there's no marker to apply the playhead treatment to. We render
-  // our own synthetic markers for those cells so the activity layer is fully
-  // decoupled from scale membership. Cells already in `renderHighlights` are
-  // skipped here (they light up via the `isPlayhead` modifier in that loop).
-  const activityOnlyHighlights = useMemo<Highlight[]>(() => {
-    const cells = activeCells ?? (storePlayheadCell ? [storePlayheadCell] : []);
-    if (cells.length === 0) return [];
-    const out: Highlight[] = [];
-    const seen = new Set<string>();
-    for (const c of cells) {
-      const k = `${c.stringIndex}:${c.fret}`;
-      if (renderedKeys.has(k) || seen.has(k)) continue;
-      seen.add(k);
-      const openNote = openStrings[c.stringIndex];
-      if (!openNote) continue;
-      out.push({
-        stringIndex: c.stringIndex,
-        fret: c.fret,
-        noteName: noteAt(openNote, c.fret),
-        intervalLabel: '',
-        degreeNumber: 0,
-        category: 'tone',
-      });
-    }
-    return out;
-  }, [activeCells, storePlayheadCell, renderedKeys, openStrings]);
-
-  // Context layer (the "territory"): the pattern's footprint, drawn dim behind
-  // the activity layer. Skips cells already drawn by the render set, and cells
-  // that are currently active (those get the bright activity treatment instead).
-  const footprintHighlights = useMemo<Highlight[]>(() => {
-    if (!footprintCells || footprintCells.length === 0) return [];
-    const out: Highlight[] = [];
-    const seen = new Set<string>();
-    for (const c of footprintCells) {
-      const k = `${c.stringIndex}:${c.fret}`;
-      if (renderedKeys.has(k) || seen.has(k)) continue;
-      if (activeCellKeys?.has(k)) continue;
-      seen.add(k);
-      const openNote = openStrings[c.stringIndex];
-      if (!openNote) continue;
-      out.push({
-        stringIndex: c.stringIndex,
-        fret: c.fret,
-        noteName: noteAt(openNote, c.fret),
-        intervalLabel: '',
-        degreeNumber: 0,
-        category: 'tone',
-      });
-    }
-    return out;
-  }, [footprintCells, renderedKeys, activeCellKeys, openStrings]);
+  const {
+    instrumentId,
+    fretCount,
+    stringCount,
+    tuning,
+    capo,
+    effectiveKey,
+    type,
+    labels,
+    settings,
+    leftHanded,
+    openStrings,
+    renderHighlights,
+    renderedKeys,
+    inShapeKeys,
+    activeCellKeys,
+    playheadCell,
+    activityOnlyHighlights,
+    footprintHighlights,
+    isProgramming,
+    customSequence,
+    playback,
+  } = useFretboardModel({
+    highlights: highlightsProp,
+    neutralGrid,
+    dimNonHighlighted,
+    activeCells,
+    footprintCells,
+  });
 
   const onCellClick = useCallback(
     (cell: { stringIndex: number; fret: number }, shift: boolean) => {
@@ -291,7 +129,7 @@ export function Fretboard({
         return;
       }
       if (!isProgramming) return;
-      playback.playback?.addCustomCell(cell);
+      playback?.addCustomCell(cell);
       // Mirror to store for the UI to re-render with the new badge.
       usePlaybackStore.setState((s) => {
         if (s.customSequence.some((c) => cellsEqual(c, cell))) {
@@ -300,14 +138,12 @@ export function Fretboard({
         return { customSequence: [...s.customSequence, cell] };
       });
     },
-    [isProgramming, playback.playback, onCellClickOverride],
+    [isProgramming, playback, onCellClickOverride],
   );
 
   const clickable = alwaysClickable || isProgramming || Boolean(onCellClickOverride);
 
   const [hoverCell, setHoverCell] = useState<{ stringIndex: number; fret: number } | null>(null);
-
-  const leftHanded = settings.handedness === 'left';
 
   return (
     <div className={cn('w-full overflow-x-auto scrollbar-thin', leftHanded && 'fb-left-handed')}>

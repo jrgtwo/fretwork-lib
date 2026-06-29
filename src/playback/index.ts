@@ -4,8 +4,11 @@ export {
   resolveShapeAbsoluteCells,
   getCagedPositionMap,
   getCagedShapeSet,
+  getCagedShapeSetForInput,
 } from './patterns/caged';
 export type { AbsoluteCell } from './patterns/caged';
+export { buildResolveInput } from './build-resolve-input';
+export type { BuildResolveInputArgs } from './build-resolve-input';
 export type { CagedShape, CagedShapeId, CagedLetter } from './patterns/caged-shapes-data';
 export { usePlayback } from './usePlayback';
 export type { UsePlaybackReturn } from './usePlayback';
