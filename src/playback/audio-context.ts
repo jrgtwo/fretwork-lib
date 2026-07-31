@@ -33,15 +33,29 @@ export function audioNow(): number {
  *
  *  Used by UI animation loops (timeline playhead, auto-scroll, active-event
  *  tracking). Returns 0 before the transport has started or if the subtraction
- *  would go negative (e.g. the first few ticks of playback). */
+ *  would go negative (e.g. the first few ticks of playback).
+ *
+ *  **Never throws, and never returns a non-finite number.** Callers are rAF loops,
+ *  where an exception escapes whatever try/catch the caller wrote and surfaces as an
+ *  unhandled error; and where a NaN silently propagates into layout maths that then
+ *  compares false against everything. Without an AudioContext — jsdom, or before the
+ *  first user gesture — `transport.bpm.value` throws and `transport.ticks` reads
+ *  `undefined`, so both cases are reachable in normal use, not just in tests. "No
+ *  transport yet" means position zero. */
 export function getTransportTicks(projectPpq: number): number {
-  const transport = Tone.getTransport();
-  const transportPpq = transport.PPQ || projectPpq;
-  const raw = (transport.ticks * projectPpq) / transportPpq;
-  const latencySec = getEffectiveLatencySec();
-  const bpm = transport.bpm.value;
-  const latencyTicks = latencySec * projectPpq * bpm / 60;
-  return Math.max(0, raw - latencyTicks);
+  try {
+    const transport = Tone.getTransport();
+    const transportPpq = transport.PPQ || projectPpq;
+    const raw = (transport.ticks * projectPpq) / transportPpq;
+    const latencySec = getEffectiveLatencySec();
+    const bpm = transport.bpm.value;
+    const latencyTicks = (latencySec * projectPpq * bpm) / 60;
+    const ticks = Math.max(0, raw - latencyTicks);
+    return Number.isFinite(ticks) ? ticks : 0;
+  } catch {
+    // No AudioContext — nothing is playing, so the head is at the start.
+    return 0;
+  }
 }
 
 /** Best-effort read of `AudioContext.outputLatency` in seconds. Returns 0 if
