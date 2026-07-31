@@ -237,6 +237,10 @@ vi.mock('tone', () => {
       transpose: (_n: number) => frequencyShim(note),
       toNote: () => note,
       toMidi: () => 60,
+      // `Voice.play` converts to Hz so it can apply the humanize detune in cents
+      // (Voice.ts:327). A fixed value is fine — nothing here asserts pitch, and the
+      // detune is randomised anyway.
+      toFrequency: () => 440,
     };
   }
 
@@ -292,9 +296,29 @@ vi.mock('tone', () => {
     Vibrato: MockVibrato,
     PitchShift: MockPitchShift,
     Frequency: frequencyShim,
-    getContext: () => ({ currentTime: 0 }),
+    // Added after this mock was written, and all reached through code the Voice tests
+    // already exercise: `Convolver` is the cab IR, `JCReverb` the per-voice spring,
+    // `WaveShaper` the amp saturators, and `Meter` + `Limiter` are MasterBus (which
+    // `Voice` connects its output to). Plain nodes on purpose — these tests assert
+    // Voice's chain wiring, not Tone's DSP.
+    Convolver: class extends MockNode {},
+    JCReverb: class extends MockNode {},
+    WaveShaper: class extends MockNode {
+      constructor(_curve?: unknown, _size?: number) { super(); }
+      oversample = 'none';
+      setMap = noop;
+    },
+    Limiter: class extends MockNode {},
+    Meter: class extends MockNode {
+      constructor(_opts?: unknown) { super(); }
+      getValue() { return -Infinity; }
+    },
+    getContext: () => ({ currentTime: 0, lookAhead: 0.1 }),
     start: async () => undefined,
+    loaded: async () => undefined,
     now: () => 0,
+    dbToGain: (db: number) => Math.pow(10, db / 20),
+    gainToDb: (g: number) => 20 * Math.log10(Math.max(0.0001, g)),
   };
 });
 

@@ -158,18 +158,20 @@ describe('EventScheduler placement-change emission', () => {
     const changes: Array<string | null> = [];
     scheduler.onPlacementChange((id) => changes.push(id));
 
-    // Tick 1: head starts at 0, advances by TICKS_PER_INTERVAL (120).
-    // After _onTick, headTick = 120, which is within the first placement.
+    // `_tickForTest` takes the tick to poll at. The scheduler reads position from the
+    // transport in production, but jsdom has no AudioContext, so `Tone.getTransport()`
+    // is an inert stub whose `ticks` read `undefined` — there is no head to advance.
+    // (This test used to assume `_tickForTest` advanced an internal head by 120 ticks
+    // per call; that head no longer exists.)
     metronome.start();
     scheduler._tickForTest(0);
     expect(changes).toEqual([firstPlacementId]);
 
-    // Advance past first placement boundary by ticking enough 16th-note slices.
+    // Step across the first placement's boundary a 16th at a time.
     const ticksPerSlice = PPQ / 4; // 120
-    const ticksNeeded = firstDuration + ticksPerSlice;
-    const sliceCount = Math.ceil(ticksNeeded / ticksPerSlice);
-    for (let i = 0; i < sliceCount; i++) {
-      scheduler._tickForTest(i * 0.1);
+    const sliceCount = Math.ceil((firstDuration + ticksPerSlice) / ticksPerSlice);
+    for (let i = 1; i <= sliceCount; i++) {
+      scheduler._tickForTest(i * ticksPerSlice);
     }
     expect(changes).toContain(secondPlacementId);
   });

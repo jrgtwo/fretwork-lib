@@ -221,6 +221,12 @@ export class EventScheduler {
       this._activeNow.clear();
       this._activeKey = '';
       this._emitActive();
+      // Same reset as the active set beside it: stopping ends playback, so there is
+      // no "current placement" any more. Without this the id stays at whatever was
+      // last under the head and a consumer highlighting it keeps that highlight lit
+      // for the rest of the session — the poll that would correct it only runs while
+      // the transport is moving.
+      this._emitPlacementChange(null);
       this._emitHead(0);
       try {
         this._instrument.releaseAll();
@@ -468,13 +474,28 @@ export class EventScheduler {
 
   // ─── Test seam ─────────────────────────────────────────────────────────────
 
-  /** Drive one slice synchronously. Legacy test seam from the slice-based
-   *  architecture. Now a no-op — audio scheduling happens via
-   *  _scheduleAllEvents at play start, not per-slice. Kept so existing tests
-   *  still compile; rewrite those tests to assert on _scheduledIds + the
-   *  scheduled callbacks instead. */
-  _tickForTest(_audioTime: number): void {
-    // no-op
+  /**
+   * Poll the transport once, synchronously — the test seam for active-event and
+   * placement-change emission.
+   *
+   * Audio scheduling is NOT driven from here: `_scheduleAllEvents` pre-schedules
+   * everything at play start, so there are no per-slice audio callbacks to pump. What
+   * this drives is the observation side, which otherwise only runs inside a
+   * `requestAnimationFrame` loop that a synchronous test can never reach.
+   *
+   * It was a literal `// no-op` for a while, left behind by the move off the
+   * slice-based architecture. Tests kept calling it and kept asserting on emissions
+   * that could no longer happen — failing for the seam being hollow rather than for
+   * anything being wrong.
+   *
+   * Takes the tick to poll at, because the transport cannot supply one under jsdom —
+   * with no AudioContext its `ticks` and `PPQ` are `undefined`. Everything downstream
+   * of the position (loop wrapping, the active-set scan, the dedupe) still runs on the
+   * real path; only the transport read is bypassed. Omit the argument to read the
+   * transport as production does.
+   */
+  _tickForTest(tick?: number): void {
+    this._pollActive(tick);
   }
 
   // ─── Internal ──────────────────────────────────────────────────────────────
@@ -664,6 +685,57 @@ export class EventScheduler {
    *
    *  Cost is O(events) per frame — for typical stream sizes (<500 events)
    *  this is sub-millisecond. */
+  /**
+   * One poll of the transport: recompute the active set and the current placement,
+   * emitting only on change.
+   *
+   * Split out of the rAF loop below so it can be driven directly. The loop itself is
+   * unreachable from a synchronous test — it needs a real frame — which is why
+   * `_tickForTest` exists and why it must call *this*, not schedule anything.
+   */
+  /** The transport's position, converted into our PPQ domain. */
+  private _transportTick(): number {
+    const transport = Tone.getTransport();
+    const transportPpq = transport.PPQ || PPQ;
+    return (transport.ticks * PPQ) / transportPpq;
+  }
+
+  private _pollActive(tickOverride?: number): void {
+    const stream = this._stream;
+    if (!stream || stream.durationTicks <= 0) return;
+    let tickPos = tickOverride ?? this._transportTick();
+    // Without an AudioContext the transport is an inert stub whose `ticks` and `PPQ`
+    // read `undefined`, so this arrives as NaN — which then compares false against
+    // every boundary and silently reports nothing active and no placement. Bail
+    // loudly-ish instead of pretending the head is somewhere.
+    if (!Number.isFinite(tickPos)) return;
+    if (this._loop) {
+      const region = this._resolveRegion();
+      tickPos = wrapTick(tickPos, region.start, region.end);
+    }
+
+    // Compute active set + a comparison key in one pass.
+    let newKey = '';
+    const newActive = new Map<string, ScheduledEvent>();
+    const events = stream.eventsInRange(0, stream.durationTicks);
+    for (const e of events) {
+      const end = e.startTick + e.durationTicks;
+      if (e.startTick <= tickPos && tickPos < end) {
+        newActive.set(e.id, e);
+        newKey += e.id + ',';
+      }
+    }
+
+    if (newKey !== this._activeKey) {
+      this._activeKey = newKey;
+      this._activeNow = newActive;
+      this._emitActive();
+    }
+
+    // Placement-change tracking (cheap; _emitPlacementChange dedupes).
+    this._emitPlacementChange(this._placementAtTick(tickPos));
+  }
+
   private _startActiveLoop(): void {
     if (this._activeRafId !== null) return;
     if (typeof requestAnimationFrame === 'undefined') return;
@@ -672,40 +744,7 @@ export class EventScheduler {
         this._activeRafId = null;
         return;
       }
-      const stream = this._stream;
-      if (!stream || stream.durationTicks <= 0) {
-        this._activeRafId = requestAnimationFrame(loop);
-        return;
-      }
-      const transport = Tone.getTransport();
-      const transportPpq = transport.PPQ || PPQ;
-      let tickPos = (transport.ticks * PPQ) / transportPpq;
-      if (this._loop) {
-        const region = this._resolveRegion();
-        tickPos = wrapTick(tickPos, region.start, region.end);
-      }
-
-      // Compute active set + a comparison key in one pass.
-      let newKey = '';
-      const newActive = new Map<string, ScheduledEvent>();
-      const events = stream.eventsInRange(0, stream.durationTicks);
-      for (const e of events) {
-        const end = e.startTick + e.durationTicks;
-        if (e.startTick <= tickPos && tickPos < end) {
-          newActive.set(e.id, e);
-          newKey += e.id + ',';
-        }
-      }
-
-      if (newKey !== this._activeKey) {
-        this._activeKey = newKey;
-        this._activeNow = newActive;
-        this._emitActive();
-      }
-
-      // Placement-change tracking (cheap; _emitPlacementChange dedupes).
-      this._emitPlacementChange(this._placementAtTick(tickPos));
-
+      this._pollActive();
       this._activeRafId = requestAnimationFrame(loop);
     };
     this._activeRafId = requestAnimationFrame(loop);

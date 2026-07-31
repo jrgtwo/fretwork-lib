@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+// Was a bare `require('tonal')` inline, which this ESM/TS project has no `require` for —
+// it typechecked nowhere and only survived because Vite's transform tolerated it.
+import { Note } from 'tonal';
 import { ascendingPitchPattern } from '../src/playback/patterns/ascending-pitch';
 import { stringByStringPattern } from '../src/playback/patterns/string-by-string';
 import { buildGrid, computeHighlights, FRET_COUNT } from '../src/lib/fretboard';
@@ -30,7 +33,6 @@ describe('ascendingPitchPattern', () => {
     const seq = ascendingPitchPattern.resolve(makeInput());
     expect(seq.length).toBeGreaterThan(0);
     // Check pitch ordering by computing midi directly from tuning.
-    const { Note } = require('tonal');
     const pitches = seq.map((c) => Note.midi(STANDARD.strings[c.stringIndex])! + c.fret);
     for (let i = 1; i < pitches.length; i++) {
       expect(pitches[i]).toBeGreaterThanOrEqual(pitches[i - 1]);

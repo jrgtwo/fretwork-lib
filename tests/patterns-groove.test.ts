@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { GROOVE_PRESETS, presetMatching, type GroovePresetId } from '../src/patterns';
+import { GROOVE_PRESETS, presetMatching } from '../src/patterns';
 
 describe('GROOVE_PRESETS', () => {
   it('includes Straight, Swing 8ths, Shuffle, 16th Swing', () => {

@@ -33,6 +33,15 @@ class NotesBusImpl {
   /** Linear 0–1. Applied to the gain node once it exists. */
   private _level = 1;
 
+  constructor() {
+    // Our gain is wired into MasterBus exactly once, in `_ensure`. If the bus is torn
+    // down afterwards we are left holding a node connected to a disposed graph, and
+    // `_ensure` would short-circuit on it forever — every voice silent, the metronome
+    // click still audible because it bypasses the bus. Dropping the gain here means
+    // the next `connectVoice` rebuilds and rewires.
+    MasterBus.onDispose(() => this.dispose());
+  }
+
   /** Build the gain on first audio use and wire it into the master bus. */
   private _ensure(): Tone.Gain {
     if (this._gain) return this._gain;
@@ -40,6 +49,17 @@ class NotesBusImpl {
     MasterBus.connectVoice(gain);
     this._gain = gain;
     return gain;
+  }
+
+  /**
+   * Drop the gain so the next connection rebuilds it.
+   *
+   * `_level` deliberately survives — it is a user setting, not graph state, and a bus
+   * rebuild should not reset the notes volume.
+   */
+  dispose(): void {
+    this._gain?.dispose();
+    this._gain = null;
   }
 
   /** Connection point for auto-connecting voices (mirrors MasterBus.connectVoice). */
