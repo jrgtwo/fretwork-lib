@@ -41,12 +41,6 @@ importers:
       tonal:
         specifier: ^6.4.1
         version: 6.4.3
-      tone:
-        specifier: ^15.1.22
-        version: 15.1.22
-      zustand:
-        specifier: ^5.0.3
-        version: 5.0.14(@types/react@18.3.31)(react@18.3.1)
     devDependencies:
       '@testing-library/jest-dom':
         specifier: ^6.6.3
@@ -69,12 +63,18 @@ importers:
       react-dom:
         specifier: ^18.3.1
         version: 18.3.1(react@18.3.1)
+      tone:
+        specifier: ^15.1.22
+        version: 15.1.22
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
       vitest:
         specifier: ^3.0.5
         version: 3.2.6(jsdom@26.1.0)
+      zustand:
+        specifier: ^5.0.3
+        version: 5.0.14(@types/react@18.3.31)(react@18.3.1)
 
 packages:
 
