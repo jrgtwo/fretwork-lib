@@ -427,6 +427,7 @@ export {
   SAMPLE_PACKS,
   getSamplePack,
   detectSamplePack,
+  prefetchSampleBanks,
   CABINET_IRS,
   getCabinetIR,
   detectCabinetIR,

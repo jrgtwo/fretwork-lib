@@ -7,5 +7,10 @@ export { resolveActiveVoice } from './resolve-active-voice';
 export { buildEffectiveVoice } from './buildEffectiveVoice';
 export { Voice } from './Voice';
 export { MasterBus } from './MasterBus';
-export { SAMPLE_PACKS, getSamplePack, detectSamplePack } from './sample-packs';
+export {
+  SAMPLE_PACKS,
+  getSamplePack,
+  detectSamplePack,
+  prefetchSampleBanks,
+} from './sample-packs';
 export type { SamplePack } from './sample-packs';
