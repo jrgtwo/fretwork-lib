@@ -157,11 +157,6 @@ export class EventScheduler {
   private _completeListeners = new Set<CompleteListener>();
   private _placementChangeListeners = new Set<PlacementChangeListener>();
   private _currentPlacementId: string | null = null;
-  /** requestAnimationFrame handle for the visual head-position loop. The loop reads
-   *  `Tone.Transport.seconds` (the actual audio playback position) and emits head
-   *  updates smoothly between scheduler ticks. Audio scheduling stays per-slice in
-   *  `_onTick` — this loop only drives the visual playhead. */
-  private _visualRafId: number | null = null;
   private _role: 'primary' | 'follower';
 
   constructor(opts: EventSchedulerOpts) {
@@ -215,7 +210,6 @@ export class EventScheduler {
 
     // Clear active state when transport stops.
     this._unsubStop = this._metronome.on('stop', () => {
-      this._stopVisualLoop();
       this._stopActiveLoop();
       // Cancel any pre-scheduled events that haven't fired yet. Sample-accurate
       // — eliminates the "previous pattern bleeds into next" symptom.
@@ -450,7 +444,6 @@ export class EventScheduler {
   // ─── Cleanup ───────────────────────────────────────────────────────────────
 
   dispose(): void {
-    this._stopVisualLoop();
     this._stopActiveLoop();
     const disposeTransport = Tone.getTransport();
     for (const id of this._scheduledIds) {
@@ -745,6 +738,16 @@ export class EventScheduler {
 
     // Placement-change tracking (cheap; _emitPlacementChange dedupes).
     this._emitPlacementChange(this._placementAtTick(tickPos));
+
+    // The visual head. Emitted from here rather than from a loop of its own: this
+    // already reads the transport once per frame and has already folded the position
+    // back into the loop region, so a second rAF would duplicate both and could
+    // disagree with the highlight it sits beside.
+    //
+    // There used to be a `_visualRafId` loop for this that nothing ever started —
+    // only `_stopVisualLoop` existed — so `onHead` never fired during playback and
+    // every consumer had to run its own rAF and read `Tone.Transport` directly.
+    this._emitHead(tickPos);
   }
 
   private _startActiveLoop(): void {
@@ -765,13 +768,6 @@ export class EventScheduler {
     if (this._activeRafId !== null) {
       cancelAnimationFrame(this._activeRafId);
       this._activeRafId = null;
-    }
-  }
-
-  private _stopVisualLoop(): void {
-    if (this._visualRafId !== null) {
-      cancelAnimationFrame(this._visualRafId);
-      this._visualRafId = null;
     }
   }
 

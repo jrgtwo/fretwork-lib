@@ -299,3 +299,51 @@ describe('EventScheduler — instrument warm-up', () => {
     expect(instrument.ensureBuilt).not.toHaveBeenCalled();
   });
 });
+
+describe('EventScheduler — head emission', () => {
+  it('emits the head from the same poll as the highlights', () => {
+    let p = createEmptyPattern();
+    p = stampEvent({ pattern: p, stringIndex: 0, fret: 0, startTick: 0, durationTicks: PPQ }).pattern;
+
+    const { scheduler, metronome } = makeScheduler();
+    scheduler.setStream(new PatternSource(p));
+
+    const heads: number[] = [];
+    scheduler.onHead((t) => heads.push(t));
+
+    metronome.start();
+    heads.length = 0; // start() emits the start tick; we want the polled ones
+
+    scheduler._tickForTest(0);
+    scheduler._tickForTest(PPQ / 2);
+
+    // There used to be a `_visualRafId` loop for this that nothing ever started, so
+    // onHead never fired during playback and every consumer ran its own rAF reading
+    // Tone.Transport directly — one read per consumer, each able to disagree with the
+    // highlight beside it.
+    expect(heads).toEqual([0, PPQ / 2]);
+    scheduler.dispose();
+  });
+
+  it('emits a head folded into the loop, matching what is audible', () => {
+    let p = createEmptyPattern();
+    p = stampEvent({ pattern: p, stringIndex: 0, fret: 0, startTick: 0, durationTicks: PPQ }).pattern;
+
+    const { scheduler, metronome } = makeScheduler();
+    scheduler.setStream(new PatternSource(p));
+    scheduler.setLoop(true);
+
+    const heads: number[] = [];
+    scheduler.onHead((t) => heads.push(t));
+
+    metronome.start();
+    heads.length = 0;
+
+    // The transport climbs forever while looping — the scheduler reschedules at
+    // increasing absolute ticks — so a raw tick would run off the end of the grid.
+    scheduler._tickForTest(p.durationTicks + PPQ);
+
+    expect(heads).toEqual([PPQ]);
+    scheduler.dispose();
+  });
+});
