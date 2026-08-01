@@ -212,6 +212,26 @@ export class Voice implements GuitarInstrument {
     this._ensureBuilt();
   }
 
+  /**
+   * Build the graph and resolve once this voice can actually make a sound.
+   *
+   * `ensureBuilt()` only *starts* the sampler downloads — it returns immediately, so a
+   * note triggered straight after it fires into an unloaded `Sampler` and plays
+   * silently, with nothing to await and no error raised. `Metronome.start()` avoids
+   * that by awaiting `Tone.loaded()` itself, but any path that doesn't run the
+   * transport — auditioning a voice in an editor, previewing a cell — had no
+   * equivalent.
+   *
+   * Caveat worth knowing: `Tone.loaded()` is global. It resolves when *every* pending
+   * buffer is decoded, not only this voice's, so a second voice loading concurrently
+   * will delay it. That is the same guarantee `Metronome.start()` relies on, and Tone
+   * exposes no per-instrument equivalent.
+   */
+  async ready(): Promise<void> {
+    this._ensureBuilt();
+    await Tone.loaded();
+  }
+
   private _ensureBuilt(): void {
     if (this._synth) return;
     const src = this._preset.source;

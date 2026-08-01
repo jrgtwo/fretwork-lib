@@ -20,6 +20,7 @@ interface FakeMetronome {
   bpm: number;
   isRunning: boolean;
   on(event: 'start' | 'stop', handler: StartStopListener): () => void;
+  onBeforeStart(handler: () => void | Promise<void>): () => void;
   setBpm(bpm: number): void;
   setSwing(swing: number): void;
   start(): void;
@@ -31,6 +32,10 @@ function makeFakeMetronome(): FakeMetronome {
     start: new Set(),
     stop: new Set(),
   };
+  // Warm-ups run before the 'start' listeners, mirroring the real Metronome: they
+  // exist so async loading is in flight before it awaits Tone.loaded(), which happens
+  // ahead of the transport actually starting.
+  const beforeStart = new Set<() => void | Promise<void>>();
   const m: FakeMetronome = {
     bpm: 120,
     isRunning: false,
@@ -38,9 +43,14 @@ function makeFakeMetronome(): FakeMetronome {
       listeners[event].add(handler);
       return () => listeners[event].delete(handler);
     },
+    onBeforeStart(handler) {
+      beforeStart.add(handler);
+      return () => beforeStart.delete(handler);
+    },
     setBpm(bpm) { m.bpm = bpm; },
     setSwing(_swing) { /* no-op */ },
     start() {
+      for (const warm of beforeStart) void warm();
       m.isRunning = true;
       for (const h of listeners.start) h();
     },
@@ -57,6 +67,7 @@ function makeFakeInstrument() {
     play: vi.fn(),
     releaseAll: vi.fn(),
     dispose: vi.fn(),
+    ensureBuilt: vi.fn(),
     output: undefined,
   };
 }
@@ -263,5 +274,28 @@ describe('EventScheduler.restream', () => {
     expect(scheduler.startTick).toBe(0);
     scheduler.setStartTick(480);
     expect(scheduler.startTick).toBe(480);
+  });
+});
+
+
+describe('EventScheduler — instrument warm-up', () => {
+  it('warms the instrument before the transport starts, not after', () => {
+    const { metronome, instrument } = makeScheduler();
+
+    expect(instrument.ensureBuilt).not.toHaveBeenCalled();
+    metronome.start();
+
+    // The scheduler registers on the metronome's pre-start hook, which runs before it
+    // awaits buffer loads. Previously the caller had to call ensureBuilt() itself in
+    // the right order before every start; getting it wrong meant a silent first note
+    // and no error anywhere.
+    expect(instrument.ensureBuilt).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops warming once disposed', () => {
+    const { scheduler, metronome, instrument } = makeScheduler();
+    scheduler.dispose();
+    metronome.start();
+    expect(instrument.ensureBuilt).not.toHaveBeenCalled();
   });
 });

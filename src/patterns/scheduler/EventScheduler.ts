@@ -146,6 +146,7 @@ export class EventScheduler {
   /** Comparison key for the last emitted active set. Used to dedupe emits. */
   private _activeKey = '';
   private _unsubStart: (() => void) | null = null;
+  private _unsubBeforeStart: (() => void) | null = null;
   private _unsubStop: (() => void) | null = null;
   private _tuning: TuningDef;
   private _capo: number;
@@ -182,6 +183,14 @@ export class EventScheduler {
     // TrackLane placement detection) each run their own self-contained rAF
     // reading Tone.Transport.ticks directly. Starting an orphan loop here
     // would just burn CPU without any subscribers.
+    // Warm the instrument before the metronome waits on buffer loads, so a
+    // sampler-backed voice is fetching by the time `Tone.loaded()` is awaited. Without
+    // this the caller had to call `ensureBuilt()` itself, in the right order, before
+    // every start — and getting it wrong produced a silent first note with no error.
+    this._unsubBeforeStart = this._metronome.onBeforeStart(() => {
+      this._instrument.ensureBuilt?.();
+    });
+
     this._unsubStart = this._metronome.on('start', () => {
       this._activeNow.clear();
       this._activeKey = '';
@@ -457,6 +466,8 @@ export class EventScheduler {
       this._scheduledId = null;
     }
     this._unsubStart?.();
+    this._unsubBeforeStart?.();
+    this._unsubBeforeStart = null;
     this._unsubStart = null;
     this._unsubStop?.();
     this._unsubStop = null;
