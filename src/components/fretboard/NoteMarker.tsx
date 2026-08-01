@@ -23,6 +23,10 @@ interface Props {
    *  in the active scale but outside the selected CAGED shape. The fretboard skips
    *  rendering ghosted markers entirely when the user has turned ghost markers off. */
   ghosted?: boolean;
+  /** When true, render as background filler — fainter than `ghosted`, so the ghosted
+   *  footprint layer still reads as a layer on top of it. Used by the fretboard's
+   *  `dimNonHighlighted` whole-grid filler. */
+  dimmed?: boolean;
 }
 
 const CATEGORY_TO_VAR: Record<Highlight['category'], string> = {
@@ -53,6 +57,7 @@ export function NoteMarker({
   programmingIndex,
   onClick,
   ghosted,
+  dimmed,
 }: Props) {
   const { stringIndex, fret } = highlight;
   const cx =
@@ -84,14 +89,18 @@ export function NoteMarker({
     isPlayhead ? 'fb-playhead' : '',
     onClick ? 'fb-clickable' : '',
     ghosted ? 'fb-ghosted' : '',
+    dimmed ? 'fb-dimmed' : '',
   ]
     .filter(Boolean)
     .join(' ');
 
+  // Three tiers, so layers stack readably: full > ghosted overlay > background filler.
+  const opacity = dimmed ? 0.12 : ghosted ? 0.22 : undefined;
+
   return (
     <g
       className={groupClass}
-      style={{ transformOrigin: `${cx}px ${cy}px`, opacity: ghosted ? 0.22 : undefined }}
+      style={{ transformOrigin: `${cx}px ${cy}px`, opacity }}
       onClick={onClick}
     >
       <title>{`${highlight.noteName} · ${highlight.intervalLabel} · string ${stringIndex + 1}, fret ${fret}`}</title>

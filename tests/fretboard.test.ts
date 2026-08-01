@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
+import { createElement } from 'react';
+import { render, renderHook, cleanup, fireEvent } from '@testing-library/react';
 import {
   buildGrid,
   effectiveOpenStrings,
@@ -9,6 +11,42 @@ import {
 } from '../src/lib/fretboard';
 import { getTuning } from '../src/lib/tunings';
 import { getScale } from '../src/lib/scales';
+import { Fretboard } from '../src/components/fretboard/Fretboard';
+import { useFretboardModel } from '../src/components/fretboard/useFretboardModel';
+import { usePlayback, _resetSharedPlaybackForTests } from '../src/playback/usePlayback';
+import { usePlaybackStore } from '../src/playback/usePlaybackStore';
+import { useFretworkStore } from '../src/store/useFretworkStore';
+import type { Playback } from '../src/playback/Playback';
+import type { Highlight } from '../src/types';
+
+// Counts every `new Playback(...)`. The <Fretboard> defect this guards was that
+// merely rendering a board built the Practice singleton (plus its voice + metronome
+// subscriptions) — a return-value assertion would not have caught it.
+const playbackSpy = vi.hoisted(() => ({ constructed: 0 }));
+vi.mock('../src/playback/Playback', () => {
+  class FakePlayback {
+    constructor() {
+      playbackSpy.constructed++;
+    }
+    dispose(): void {}
+    onPlayheadChange(): void {}
+    setEnabled(): void {}
+    setPatternId(): void {}
+    setCustomSequence(): void {}
+    setResolveInput(): void {}
+    setInstrument(): void {}
+    startProgramming(): void {}
+    finishProgramming(): void {}
+    addCustomCell(): void {}
+    get resolvedSequence(): readonly unknown[] {
+      return [];
+    }
+    get playheadIndex(): number {
+      return 0;
+    }
+  }
+  return { Playback: FakePlayback };
+});
 
 const STANDARD = getTuning('standard')!;
 const DROP_D = getTuning('drop-d')!;
@@ -154,5 +192,178 @@ describe('fretCenterX', () => {
     const c = fretCenterX(5, 1000);
     expect(c).toBeGreaterThan(fretX(4, 1000));
     expect(c).toBeLessThan(fretX(5, 1000));
+  });
+});
+
+describe('<Fretboard>', () => {
+  const fretworkState = useFretworkStore.getState();
+  const playbackState = usePlaybackStore.getState();
+
+  afterEach(() => {
+    cleanup();
+    useFretworkStore.setState(fretworkState, true);
+    usePlaybackStore.setState(playbackState, true);
+  });
+
+  afterAll(() => {
+    _resetSharedPlaybackForTests();
+  });
+
+  const markers = (root: HTMLElement) => root.querySelectorAll('.fb-marker');
+  const ghosted = (root: HTMLElement) => root.querySelectorAll('.fb-marker.fb-ghosted');
+  const filler = (root: HTMLElement) => root.querySelectorAll('.fb-marker.fb-dimmed');
+  const playheads = (root: HTMLElement) => root.querySelectorAll('.fb-marker.fb-playhead');
+  // 6 strings × frets 0..22 — the whole grid dimNonHighlighted must fill.
+  const GRID = 6 * 23;
+  const ROOT_A: Highlight = {
+    stringIndex: 0,
+    fret: 5,
+    noteName: 'A2',
+    intervalLabel: 'R',
+    degreeNumber: 1,
+    category: 'root',
+  };
+
+  it('does not construct the Playback singleton, though usePlayback still does', () => {
+    _resetSharedPlaybackForTests();
+    const before = playbackSpy.constructed;
+
+    render(createElement(Fretboard));
+    expect(playbackSpy.constructed - before).toBe(0);
+    cleanup();
+
+    // Control: the counter is live. The call the model used to make DOES build the
+    // singleton, so the zero above is evidence the path is gone, not that the spy
+    // is inert. Deltas, not absolute counts, so test order can't invert the meaning.
+    function Probe() {
+      usePlayback();
+      return null;
+    }
+    render(createElement(Probe));
+    expect(playbackSpy.constructed - before).toBe(1);
+    cleanup();
+    _resetSharedPlaybackForTests();
+  });
+
+  it('hands the injected Playback straight back out on the model', () => {
+    const stub = { addCustomCell: vi.fn() } as unknown as Playback;
+    const { result } = renderHook(() => useFretboardModel({ playback: stub }));
+    expect(result.current.playback).toBe(stub);
+
+    const { result: bare } = renderHook(() => useFretboardModel());
+    expect(bare.current.playback).toBeNull();
+  });
+
+  it('routes legacy click-to-program into the injected Playback', () => {
+    const addCustomCell = vi.fn();
+    const stub = { addCustomCell } as unknown as Playback;
+    usePlaybackStore.setState({ isProgramming: true, customSequence: [] });
+
+    const { container } = render(
+      createElement(Fretboard, { highlights: [ROOT_A], playback: stub }),
+    );
+    const marker = container.querySelector('.fb-marker');
+    expect(marker).not.toBeNull();
+    fireEvent.click(marker!);
+
+    expect(addCustomCell).toHaveBeenCalledWith({ stringIndex: 0, fret: 5 });
+    // The store mirror is what draws the badge; both halves must fire.
+    expect(usePlaybackStore.getState().customSequence).toEqual([
+      { stringIndex: 0, fret: 5 },
+    ]);
+  });
+
+  it('derives highlights from the store when the prop is absent', () => {
+    const { container } = render(createElement(Fretboard));
+    expect(markers(container).length).toBeGreaterThan(0);
+  });
+
+  it('draws no markers when highlights is explicitly empty', () => {
+    const { container } = render(createElement(Fretboard, { highlights: [] }));
+    expect(markers(container)).toHaveLength(0);
+  });
+
+  it('uses the derived aria-label by default', () => {
+    const { container } = render(createElement(Fretboard));
+    expect(container.querySelector('svg')?.getAttribute('aria-label')).toMatch(
+      /^Fretboard showing A .+ in .+$/,
+    );
+  });
+
+  it('lets ariaLabel override the derived label', () => {
+    const { container } = render(
+      createElement(Fretboard, { highlights: [], ariaLabel: 'Pattern footprint' }),
+    );
+    expect(container.querySelector('svg')?.getAttribute('aria-label')).toBe(
+      'Pattern footprint',
+    );
+  });
+
+  it('dimNonHighlighted renders the whole grid and fades everything outside the highlights', () => {
+    const plain = render(createElement(Fretboard, { highlights: [ROOT_A] }));
+    expect(markers(plain.container)).toHaveLength(1);
+    expect(filler(plain.container)).toHaveLength(0);
+    cleanup();
+
+    const dim = render(
+      createElement(Fretboard, { highlights: [ROOT_A], dimNonHighlighted: true }),
+    );
+    expect(markers(dim.container)).toHaveLength(GRID);
+    expect(filler(dim.container)).toHaveLength(GRID - 1);
+  });
+
+  it('dimNonHighlighted still renders the filler neutrally when the store shows intervals', () => {
+    // Filler cells carry no interval label, so `labels: 'intervals'` would render them
+    // blank if the dim path stopped forcing neutral styling.
+    useFretworkStore.setState({ labels: 'intervals' });
+    const { container } = render(
+      createElement(Fretboard, { highlights: [ROOT_A], dimNonHighlighted: true }),
+    );
+    const labelled = Array.from(filler(container)).filter(
+      (g) => (g.querySelector('text')?.textContent ?? '') !== '',
+    );
+    expect(labelled).toHaveLength(GRID - 1);
+  });
+
+  it('dimNonHighlighted leaves activeCells bright, not faded', () => {
+    const active = [{ stringIndex: 3, fret: 7 }];
+    const { container } = render(
+      createElement(Fretboard, {
+        highlights: [ROOT_A],
+        dimNonHighlighted: true,
+        activeCells: active,
+      }),
+    );
+    // The grid stays complete: filler + highlight + the activity layer's own marker.
+    expect(markers(container)).toHaveLength(GRID);
+    expect(playheads(container)).toHaveLength(1);
+    expect(container.querySelectorAll('.fb-playhead.fb-dimmed')).toHaveLength(0);
+    expect(container.querySelectorAll('.fb-playhead.fb-ghosted')).toHaveLength(0);
+  });
+
+  it('dimNonHighlighted keeps footprintCells distinguishable from the filler', () => {
+    const { container } = render(
+      createElement(Fretboard, {
+        highlights: [ROOT_A],
+        dimNonHighlighted: true,
+        footprintCells: [{ stringIndex: 3, fret: 7 }],
+      }),
+    );
+    expect(markers(container)).toHaveLength(GRID);
+    // Footprint keeps the ghosted tier; the filler sits in its own fainter tier.
+    expect(ghosted(container)).toHaveLength(1);
+    expect(filler(container)).toHaveLength(GRID - 2);
+  });
+
+  it('dimNonHighlighted fills CAGED-hidden cells rather than leaving holes', () => {
+    useFretworkStore.setState({
+      mode: 'scales',
+      key: 'A',
+      type: 'major',
+      shapeId: 'caged-c',
+      settings: { ...fretworkState.settings, showGhostMarkers: false },
+    });
+    const { container } = render(createElement(Fretboard, { dimNonHighlighted: true }));
+    expect(markers(container)).toHaveLength(GRID);
   });
 });
