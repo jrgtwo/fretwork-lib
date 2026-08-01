@@ -519,3 +519,62 @@ describe('MasterBus — reverb', () => {
     expect(MasterBus.settings.decay).toBe(3);
   });
 });
+
+describe('Voice.swapPreset — source changes rebuild rather than strand the voice', () => {
+  /** ACOUSTIC_GUITAR_PRESET is sampler-backed; ELECTRIC_GUITAR_PRESET is pluck-synth. */
+  it('rebuilds on a source-KIND change instead of leaving a disposed voice', () => {
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    expect(hoisted.calls.samplerCtor).toBeGreaterThan(0);
+
+    v.swapPreset(ELECTRIC_GUITAR_PRESET);
+
+    // The old source is torn down AND a new one stands up. Before this fix
+    // swapPreset disposed and returned, so the pluck was never constructed and
+    // every subsequent note was silent with nothing thrown.
+    expect(hoisted.calls.samplerDispose).toBeGreaterThan(0);
+    expect(hoisted.calls.pluckCtor).toBe(1);
+
+    // Still playable — the point of the fix.
+    expect(() => v.play('A3', '4n', 0)).not.toThrow();
+    v.dispose();
+  });
+
+  it('rebuilds the samplers when the pack changes, not just the kind', () => {
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    const buildsAfterFirst = hoisted.calls.samplerCtor;
+    expect(buildsAfterFirst).toBeGreaterThan(0);
+
+    const otherPack = {
+      ...ACOUSTIC_GUITAR_PRESET,
+      source: { kind: 'sampler' as const, samples: [{ A3: '/other/A3.mp3' }] },
+    };
+    v.swapPreset(otherPack);
+
+    // Banks are baked into the constructed Tone.Samplers, so a different pack needs
+    // new ones. swapPreset used to compare only `kind`, accept this as an in-place
+    // edit, and apply it to nothing — the previous samples kept sounding.
+    expect(hoisted.calls.samplerCtor).toBeGreaterThan(buildsAfterFirst);
+    v.dispose();
+  });
+
+  it('leaves a never-played voice unbuilt — a swap must not create an audio graph', () => {
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.swapPreset(ELECTRIC_GUITAR_PRESET);
+    expect(hoisted.calls.samplerCtor).toBe(0);
+    expect(hoisted.calls.pluckCtor).toBe(0);
+    v.dispose();
+  });
+
+  it('still applies a same-source edit in place, with no rebuild', () => {
+    const v = new Voice(ELECTRIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    const buildsAfterFirst = hoisted.calls.pluckCtor;
+
+    v.swapPreset({ ...ELECTRIC_GUITAR_PRESET, level: { volumeDb: -6, pan: 0.2 } });
+
+    expect(hoisted.calls.pluckCtor).toBe(buildsAfterFirst);
+    v.dispose();
+  });
+});
