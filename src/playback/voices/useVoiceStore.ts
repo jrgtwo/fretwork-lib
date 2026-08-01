@@ -161,8 +161,15 @@ export const useVoiceStore = create<VoiceState>()(
         // Fire-and-forget prefetch of the newly-active voice's sample URLs so
         // the browser cache is warm by the time the user hits Play. No-op for
         // non-sampler voices.
+        //
+        // Optional-chained on purpose. `variants` is rehydrated from localStorage
+        // (`rehydrateFromStorage`, schema v1), so `preset` can be anything a past
+        // version — or a hand-edited storage entry — left behind. Selecting a voice
+        // must not be able to throw on the way to a cache warm: the ref is already
+        // committed above, and failing here would leave the store updated but the
+        // call stack unwound. A missing source just means nothing to prefetch.
         const preset = resolveActiveVoice(instrumentId, ref);
-        if (preset.source.kind === 'sampler') {
+        if (preset?.source?.kind === 'sampler') {
           prefetchSampleBanks(preset.source.samples);
         }
       },

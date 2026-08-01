@@ -588,28 +588,27 @@ function resolveSlideTarget(
  * the soft end (ppp/pp are quite quiet — you want a real sense of "barely
  * audible") and compresses at the loud end (ff and fff approach 1.0 without
  * overshooting). Tuned by ear, not derived from a standard.
+ *
+ * **Exported**, because the pattern model documents that authoring a dynamic must
+ * back-fill `velocity` "via the same curve the mapper uses" — and while this lived
+ * private to the importer, the only way for a consumer to honour that was to copy the
+ * numbers. A typed dynamic and an imported one then disagree about what `mf` sounds
+ * like the moment either side is retuned. Since the curve is tuned by ear it cannot be
+ * re-derived, so it has to be shared rather than mirrored.
  */
-function dynamicToVelocity(d: IREvent['dynamic']): number | undefined {
-  switch (d) {
-    case 'ppp':
-      return 0.08;
-    case 'pp':
-      return 0.18;
-    case 'p':
-      return 0.32;
-    case 'mp':
-      return 0.5;
-    case 'mf':
-      return 0.65;
-    case 'f':
-      return 0.8;
-    case 'ff':
-      return 0.92;
-    case 'fff':
-      return 1.0;
-    default:
-      return undefined;
-  }
+export const DYNAMIC_VELOCITY: Readonly<Record<NonNullable<IREvent['dynamic']>, number>> = {
+  ppp: 0.08,
+  pp: 0.18,
+  p: 0.32,
+  mp: 0.5,
+  mf: 0.65,
+  f: 0.8,
+  ff: 0.92,
+  fff: 1.0,
+};
+
+export function dynamicToVelocity(d: IREvent['dynamic']): number | undefined {
+  return d === undefined ? undefined : DYNAMIC_VELOCITY[d];
 }
 
 function rescaleTempoTrack(tempos: readonly TempoEvent[], scale: number): TempoEvent[] {

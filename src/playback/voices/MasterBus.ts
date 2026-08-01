@@ -88,6 +88,8 @@ class MasterBusImpl {
   private _masterGainDb: number = loadStoredMasterGainDb();
   /** Cached resolved promise so callers can await reverb readiness if they care. */
   private _generatePromise: Promise<void> | null = null;
+  /** Notified on `dispose()` — see `onDispose`. */
+  private _disposeListeners = new Set<() => void>();
 
   /** Build the bus on first audio use. Safe to call repeatedly. */
   private _ensure(): { input: Tone.Gain; reverb: Tone.Reverb } {
@@ -308,7 +310,25 @@ class MasterBusImpl {
     return this._generatePromise ?? Promise.resolve();
   }
 
-  /** Tear down the bus. Currently only used in tests. */
+  /**
+   * Subscribe to teardown.
+   *
+   * Anything caching a node wired INTO this bus has to learn when the bus goes away,
+   * or it keeps feeding a disposed graph forever. `NotesBus` is the case that matters:
+   * it builds its gain once, connects it here, then short-circuits every later call —
+   * so without this it never reconnects, and every voice routed through it falls
+   * silent while the metronome click (which bypasses the bus via `.toDestination()`)
+   * keeps playing. That is the "click plays but content silent" symptom.
+   *
+   * Listeners register here rather than the bus reaching out to them, so the import
+   * stays one-way: `NotesBus` imports `MasterBus`, never the reverse.
+   */
+  onDispose(listener: () => void): () => void {
+    this._disposeListeners.add(listener);
+    return () => this._disposeListeners.delete(listener);
+  }
+
+  /** Tear down the bus. Used by tests, and by anything rebuilding the audio graph. */
   dispose(): void {
     this._input?.dispose();
     this._reverb?.dispose();
@@ -324,6 +344,13 @@ class MasterBusImpl {
     this._safetyClip = null;
     this._generatePromise = null;
     this._settings = DEFAULT_REVERB_SETTINGS;
+    for (const l of this._disposeListeners) {
+      try {
+        l();
+      } catch {
+        // A listener that throws must not leave the rest of them stale.
+      }
+    }
   }
 }
 

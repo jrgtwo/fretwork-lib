@@ -33,6 +33,10 @@ describe('sanitizeActiveVariants', () => {
         family: 'electric',
         collectionId: null,
         preset: {} as never,
+        // Fork provenance, added to `Variant` after this fixture was written. Null is
+        // the not-a-fork case, which is the one this test is about.
+        forkedFromId: null,
+        forkedFromCreatorName: null,
       },
     ]);
     expect(out.guitar).toEqual({ kind: 'user', id: 'real-id' });

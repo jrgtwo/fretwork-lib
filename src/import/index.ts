@@ -28,6 +28,11 @@ export {
 export { validateImportIR, LIMITS, type ValidationResult } from './validator';
 export {
   mapImportToLibrary,
+  // The dynamic → velocity curve. Exported so a consumer authoring a dynamic can
+  // back-fill `velocity` through the same curve the importer uses, instead of copying
+  // the numbers and drifting.
+  DYNAMIC_VELOCITY,
+  dynamicToVelocity,
   type MapInput,
   type MapTopology,
   type MapperResult,

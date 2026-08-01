@@ -237,6 +237,10 @@ vi.mock('tone', () => {
       transpose: (_n: number) => frequencyShim(note),
       toNote: () => note,
       toMidi: () => 60,
+      // `Voice.play` converts to Hz so it can apply the humanize detune in cents
+      // (Voice.ts:327). A fixed value is fine — nothing here asserts pitch, and the
+      // detune is randomised anyway.
+      toFrequency: () => 440,
     };
   }
 
@@ -292,9 +296,29 @@ vi.mock('tone', () => {
     Vibrato: MockVibrato,
     PitchShift: MockPitchShift,
     Frequency: frequencyShim,
-    getContext: () => ({ currentTime: 0 }),
+    // Added after this mock was written, and all reached through code the Voice tests
+    // already exercise: `Convolver` is the cab IR, `JCReverb` the per-voice spring,
+    // `WaveShaper` the amp saturators, and `Meter` + `Limiter` are MasterBus (which
+    // `Voice` connects its output to). Plain nodes on purpose — these tests assert
+    // Voice's chain wiring, not Tone's DSP.
+    Convolver: class extends MockNode {},
+    JCReverb: class extends MockNode {},
+    WaveShaper: class extends MockNode {
+      constructor(_curve?: unknown, _size?: number) { super(); }
+      oversample = 'none';
+      setMap = noop;
+    },
+    Limiter: class extends MockNode {},
+    Meter: class extends MockNode {
+      constructor(_opts?: unknown) { super(); }
+      getValue() { return -Infinity; }
+    },
+    getContext: () => ({ currentTime: 0, lookAhead: 0.1 }),
     start: async () => undefined,
+    loaded: async () => undefined,
     now: () => 0,
+    dbToGain: (db: number) => Math.pow(10, db / 20),
+    gainToDb: (g: number) => 20 * Math.log10(Math.max(0.0001, g)),
   };
 });
 
@@ -493,5 +517,64 @@ describe('MasterBus — reverb', () => {
     expect(MasterBus.settings.decay).toBeCloseTo(1.5);
     MasterBus.setReverbSettings({ enabled: true, decay: 3.0, preDelay: 0.01, wet: 0.2 });
     expect(MasterBus.settings.decay).toBe(3);
+  });
+});
+
+describe('Voice.swapPreset — source changes rebuild rather than strand the voice', () => {
+  /** ACOUSTIC_GUITAR_PRESET is sampler-backed; ELECTRIC_GUITAR_PRESET is pluck-synth. */
+  it('rebuilds on a source-KIND change instead of leaving a disposed voice', () => {
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    expect(hoisted.calls.samplerCtor).toBeGreaterThan(0);
+
+    v.swapPreset(ELECTRIC_GUITAR_PRESET);
+
+    // The old source is torn down AND a new one stands up. Before this fix
+    // swapPreset disposed and returned, so the pluck was never constructed and
+    // every subsequent note was silent with nothing thrown.
+    expect(hoisted.calls.samplerDispose).toBeGreaterThan(0);
+    expect(hoisted.calls.pluckCtor).toBe(1);
+
+    // Still playable — the point of the fix.
+    expect(() => v.play('A3', '4n', 0)).not.toThrow();
+    v.dispose();
+  });
+
+  it('rebuilds the samplers when the pack changes, not just the kind', () => {
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    const buildsAfterFirst = hoisted.calls.samplerCtor;
+    expect(buildsAfterFirst).toBeGreaterThan(0);
+
+    const otherPack = {
+      ...ACOUSTIC_GUITAR_PRESET,
+      source: { kind: 'sampler' as const, samples: [{ A3: '/other/A3.mp3' }] },
+    };
+    v.swapPreset(otherPack);
+
+    // Banks are baked into the constructed Tone.Samplers, so a different pack needs
+    // new ones. swapPreset used to compare only `kind`, accept this as an in-place
+    // edit, and apply it to nothing — the previous samples kept sounding.
+    expect(hoisted.calls.samplerCtor).toBeGreaterThan(buildsAfterFirst);
+    v.dispose();
+  });
+
+  it('leaves a never-played voice unbuilt — a swap must not create an audio graph', () => {
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.swapPreset(ELECTRIC_GUITAR_PRESET);
+    expect(hoisted.calls.samplerCtor).toBe(0);
+    expect(hoisted.calls.pluckCtor).toBe(0);
+    v.dispose();
+  });
+
+  it('still applies a same-source edit in place, with no rebuild', () => {
+    const v = new Voice(ELECTRIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    const buildsAfterFirst = hoisted.calls.pluckCtor;
+
+    v.swapPreset({ ...ELECTRIC_GUITAR_PRESET, level: { volumeDb: -6, pan: 0.2 } });
+
+    expect(hoisted.calls.pluckCtor).toBe(buildsAfterFirst);
+    v.dispose();
   });
 });

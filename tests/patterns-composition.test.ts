@@ -187,7 +187,7 @@ describe('composition-ops', () => {
     });
 
     it('inserts at the requested tick on the destination lane', () => {
-      let { comp, trackBId, aIds, bIds, patternDur } = buildTwoTrackComp(1, 2);
+      let { comp, trackBId, aIds, patternDur } = buildTwoTrackComp(1, 2);
       // Drop A at the midpoint of B's first placement → should snap past it.
       const dropTick = Math.floor(patternDur / 2);
       comp = movePlacement(comp, aIds[0], trackBId, dropTick);

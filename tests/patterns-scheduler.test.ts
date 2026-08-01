@@ -20,6 +20,7 @@ interface FakeMetronome {
   bpm: number;
   isRunning: boolean;
   on(event: 'start' | 'stop', handler: StartStopListener): () => void;
+  onBeforeStart(handler: () => void | Promise<void>): () => void;
   setBpm(bpm: number): void;
   setSwing(swing: number): void;
   start(): void;
@@ -31,6 +32,10 @@ function makeFakeMetronome(): FakeMetronome {
     start: new Set(),
     stop: new Set(),
   };
+  // Warm-ups run before the 'start' listeners, mirroring the real Metronome: they
+  // exist so async loading is in flight before it awaits Tone.loaded(), which happens
+  // ahead of the transport actually starting.
+  const beforeStart = new Set<() => void | Promise<void>>();
   const m: FakeMetronome = {
     bpm: 120,
     isRunning: false,
@@ -38,9 +43,14 @@ function makeFakeMetronome(): FakeMetronome {
       listeners[event].add(handler);
       return () => listeners[event].delete(handler);
     },
+    onBeforeStart(handler) {
+      beforeStart.add(handler);
+      return () => beforeStart.delete(handler);
+    },
     setBpm(bpm) { m.bpm = bpm; },
     setSwing(_swing) { /* no-op */ },
     start() {
+      for (const warm of beforeStart) void warm();
       m.isRunning = true;
       for (const h of listeners.start) h();
     },
@@ -57,6 +67,7 @@ function makeFakeInstrument() {
     play: vi.fn(),
     releaseAll: vi.fn(),
     dispose: vi.fn(),
+    ensureBuilt: vi.fn(),
     output: undefined,
   };
 }
@@ -158,18 +169,20 @@ describe('EventScheduler placement-change emission', () => {
     const changes: Array<string | null> = [];
     scheduler.onPlacementChange((id) => changes.push(id));
 
-    // Tick 1: head starts at 0, advances by TICKS_PER_INTERVAL (120).
-    // After _onTick, headTick = 120, which is within the first placement.
+    // `_tickForTest` takes the tick to poll at. The scheduler reads position from the
+    // transport in production, but jsdom has no AudioContext, so `Tone.getTransport()`
+    // is an inert stub whose `ticks` read `undefined` — there is no head to advance.
+    // (This test used to assume `_tickForTest` advanced an internal head by 120 ticks
+    // per call; that head no longer exists.)
     metronome.start();
     scheduler._tickForTest(0);
     expect(changes).toEqual([firstPlacementId]);
 
-    // Advance past first placement boundary by ticking enough 16th-note slices.
+    // Step across the first placement's boundary a 16th at a time.
     const ticksPerSlice = PPQ / 4; // 120
-    const ticksNeeded = firstDuration + ticksPerSlice;
-    const sliceCount = Math.ceil(ticksNeeded / ticksPerSlice);
-    for (let i = 0; i < sliceCount; i++) {
-      scheduler._tickForTest(i * 0.1);
+    const sliceCount = Math.ceil((firstDuration + ticksPerSlice) / ticksPerSlice);
+    for (let i = 1; i <= sliceCount; i++) {
+      scheduler._tickForTest(i * ticksPerSlice);
     }
     expect(changes).toContain(secondPlacementId);
   });
@@ -261,5 +274,76 @@ describe('EventScheduler.restream', () => {
     expect(scheduler.startTick).toBe(0);
     scheduler.setStartTick(480);
     expect(scheduler.startTick).toBe(480);
+  });
+});
+
+
+describe('EventScheduler — instrument warm-up', () => {
+  it('warms the instrument before the transport starts, not after', () => {
+    const { metronome, instrument } = makeScheduler();
+
+    expect(instrument.ensureBuilt).not.toHaveBeenCalled();
+    metronome.start();
+
+    // The scheduler registers on the metronome's pre-start hook, which runs before it
+    // awaits buffer loads. Previously the caller had to call ensureBuilt() itself in
+    // the right order before every start; getting it wrong meant a silent first note
+    // and no error anywhere.
+    expect(instrument.ensureBuilt).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops warming once disposed', () => {
+    const { scheduler, metronome, instrument } = makeScheduler();
+    scheduler.dispose();
+    metronome.start();
+    expect(instrument.ensureBuilt).not.toHaveBeenCalled();
+  });
+});
+
+describe('EventScheduler — head emission', () => {
+  it('emits the head from the same poll as the highlights', () => {
+    let p = createEmptyPattern();
+    p = stampEvent({ pattern: p, stringIndex: 0, fret: 0, startTick: 0, durationTicks: PPQ }).pattern;
+
+    const { scheduler, metronome } = makeScheduler();
+    scheduler.setStream(new PatternSource(p));
+
+    const heads: number[] = [];
+    scheduler.onHead((t) => heads.push(t));
+
+    metronome.start();
+    heads.length = 0; // start() emits the start tick; we want the polled ones
+
+    scheduler._tickForTest(0);
+    scheduler._tickForTest(PPQ / 2);
+
+    // There used to be a `_visualRafId` loop for this that nothing ever started, so
+    // onHead never fired during playback and every consumer ran its own rAF reading
+    // Tone.Transport directly — one read per consumer, each able to disagree with the
+    // highlight beside it.
+    expect(heads).toEqual([0, PPQ / 2]);
+    scheduler.dispose();
+  });
+
+  it('emits a head folded into the loop, matching what is audible', () => {
+    let p = createEmptyPattern();
+    p = stampEvent({ pattern: p, stringIndex: 0, fret: 0, startTick: 0, durationTicks: PPQ }).pattern;
+
+    const { scheduler, metronome } = makeScheduler();
+    scheduler.setStream(new PatternSource(p));
+    scheduler.setLoop(true);
+
+    const heads: number[] = [];
+    scheduler.onHead((t) => heads.push(t));
+
+    metronome.start();
+    heads.length = 0;
+
+    // The transport climbs forever while looping — the scheduler reschedules at
+    // increasing absolute ticks — so a raw tick would run off the end of the grid.
+    scheduler._tickForTest(p.durationTicks + PPQ);
+
+    expect(heads).toEqual([PPQ]);
+    scheduler.dispose();
   });
 });

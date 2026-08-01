@@ -86,6 +86,7 @@ export function ChordShapeEditor({
           alwaysClickable
           activeCells={value.cells}
           onCellClickOverride={handleClick}
+          ariaLabel="Chord shape editor — click a cell to toggle it into the grip"
         />
       </div>
     </div>

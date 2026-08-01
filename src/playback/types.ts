@@ -145,6 +145,17 @@ export interface GuitarInstrument {
    * implementations narrow it to `Tone.ToneAudioNode`.
    */
   readonly output?: unknown;
+  /**
+   * Eagerly construct whatever this instrument needs to make a sound, so any async
+   * loading is in flight.
+   *
+   * Optional because a synth-only instrument has nothing to warm — it is meaningful
+   * for sample-backed ones, where the first note otherwise fires into an unloaded
+   * buffer and plays silently. `EventScheduler` calls it from the metronome's
+   * pre-start hook, so the scheduler warms itself rather than the caller having to
+   * remember the ordering.
+   */
+  ensureBuilt?(): void;
   dispose(): void;
 }
 

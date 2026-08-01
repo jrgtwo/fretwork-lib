@@ -63,13 +63,51 @@ vi.mock('tone', () => {
     triggerAttackRelease = vi.fn();
     dispose = vi.fn();
   }
+  /**
+   * One chainable stand-in for every node `MasterBus` builds.
+   *
+   * `Metronome` routes its click through the master bus (`Metronome.ts` imports
+   * `MasterBus`), so constructing a metronome reaches Gain / Reverb / Compressor /
+   * WaveShaper / Meter even though nothing in `src/metronome` names them. This mock
+   * predates that import, which is why every lifecycle test failed with nothing but
+   * `No "Gain" export is defined on the "tone" mock`.
+   *
+   * Deliberately one class for all five: these tests assert metronome behaviour, and a
+   * faithful per-node mock would be asserting Tone's graph instead.
+   */
+  class MockNode {
+    gain = { value: 1, setValueAtTime: vi.fn(), rampTo: vi.fn() };
+    wet = { value: 1 };
+    constructor(_opts: unknown = {}) {}
+    connect() { return this; }
+    disconnect() { return this; }
+    toDestination() { return this; }
+    getValue() { return -Infinity; }
+    generate = vi.fn(async () => this);
+    dispose = vi.fn();
+  }
   return {
     start: vi.fn(async () => undefined),
     getTransport: () => hoisted.transportMock,
     getDraw: () => hoisted.drawMock,
     Synth: MockSynth,
     Sampler: MockSampler,
+    Gain: MockNode,
+    Reverb: MockNode,
+    Compressor: MockNode,
+    Limiter: MockNode,
+    WaveShaper: MockNode,
+    Meter: MockNode,
+    Buffer: MockNode,
+    // `Metronome.start` awaits this before the first click, so the sampler's first
+    // BufferSource exists — see Metronome.ts:183.
+    loaded: vi.fn(async () => undefined),
+    now: () => 0,
+    // `lookAhead` is read in `start()` to schedule transport.start() one window out;
+    // without it that becomes `Tone.now() + undefined` = NaN.
+    getContext: () => ({ state: 'running', lookAhead: 0.1, rawContext: {}, resume: vi.fn() }),
     gainToDb: (g: number) => 20 * Math.log10(Math.max(0.0001, g)),
+    dbToGain: (db: number) => Math.pow(10, db / 20),
   };
 });
 
@@ -77,6 +115,12 @@ import { Metronome } from '../src/metronome/Metronome';
 import { getTimeSignature } from '../src/metronome/time-signatures';
 
 beforeEach(() => {
+  // Fake timers because `_dispatchTick` no longer fires its events inline — it defers
+  // them through setTimeout so UI events land with the AUDIBLE click rather than with
+  // the scheduling callback, which Tone fires up to `lookAhead` early (see the comment
+  // on _visualDelayMs). Only timers are faked; `start()`'s awaits are microtasks and
+  // resolve normally.
+  vi.useFakeTimers();
   hoisted.setCallback(null);
   hoisted.resetCounters();
   hoisted.resetSynths();
@@ -87,11 +131,31 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   hoisted.setCallback(null);
   hoisted.resetSynths();
 });
 
+/**
+ * Drive one scheduler callback and flush the events it defers.
+ *
+ * `runOnlyPendingTimers`, not `runAllTimers`: a beat also schedules its sub-ticks, and
+ * those schedule nothing further — but draining recursively would fire timers this beat
+ * never asked for and make counts depend on how far ahead the metronome had queued.
+ */
 function tick(time = 0): void {
+  tickRaw(time);
+  vi.runOnlyPendingTimers();
+}
+
+/**
+ * Drive the callback and leave the deferred events PENDING.
+ *
+ * For tests that own the clock themselves — the ones asserting that something is
+ * cancelled before it fires. Flushing inside `tick` would fire the very sub-tick they
+ * are checking never arrives, and the test would pass or fail for the wrong reason.
+ */
+function tickRaw(time = 0): void {
   const cb = hoisted.getCallback();
   if (!cb) throw new Error('No tick callback registered yet — call start() first.');
   cb(time);
@@ -574,7 +638,7 @@ describe('Metronome — subdivisions', () => {
     const m = new Metronome({ bpm: 120, subdivision: '8ths' });
     m.on('subdivision', handler);
     await m.start();
-    tick(0);
+    tickRaw(0); // must NOT flush — the point is that the sub-tick is still pending
     // Sub-tick is scheduled for +250ms. Stop before it fires.
     vi.advanceTimersByTime(100);
     m.stop();

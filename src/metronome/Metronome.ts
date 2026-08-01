@@ -91,6 +91,8 @@ export class Metronome {
     | { accent?: ClickSound; regular?: ClickSound; subdivision?: ClickSound }
     | null = null;
   private _scheduledEventId: number | null = null;
+  /** Warm-ups awaited inside start(), before `Tone.loaded()`. See `onBeforeStart`. */
+  private _beforeStart = new Set<() => void | Promise<void>>();
   /** Pending setTimeout handles for sub-tick visual/event dispatch. Cleared on
    *  stop() and dispose() so a stopped metronome doesn't keep firing sub-events. */
   private _pendingSubTimeouts: Set<ReturnType<typeof setTimeout>> = new Set();
@@ -175,6 +177,24 @@ export class Metronome {
       // the symptom is "click plays but content silent" for the first
       // ~300-700ms of playback.
       await MasterBus.warmup();
+
+      // Let anything that must be audible get its loads in flight BEFORE the
+      // `Tone.loaded()` below — otherwise there is nothing pending to wait on and that
+      // await passes instantly. This is what lets the engine warm itself instead of
+      // making correct ordering the caller's problem: an `EventScheduler` registers its
+      // instrument here, so a sampler-backed voice starts fetching now and is covered
+      // by the same await.
+      //
+      // Deliberately here and not on the 'start' event, which fires *after* the
+      // transport is already running. Failures are swallowed — a warm-up is
+      // best-effort, and a voice that refuses to build must not silence the click.
+      for (const warm of this._beforeStart) {
+        try {
+          await warm();
+        } catch {
+          // No-op.
+        }
+      }
 
       // Wait for any pending Tone.Buffer loads (e.g. Tone.Sampler samples
       // still downloading). Without this, transport.start() fires before
@@ -308,6 +328,24 @@ export class Metronome {
     if (sounds.subdivision) {
       this._voices.subdivision = normalizeClickSound(sounds.subdivision, this._voices.subdivision, this._voices.ownedVoices);
     }
+  }
+
+  /**
+   * Register work that `start()` awaits before it waits on buffer loads.
+   *
+   * For anything that has to be *audible* on the first beat. The `'start'` event is
+   * too late — it fires after the transport is already running — so a consumer whose
+   * instrument loads asynchronously (a sampler) previously had to call `ensureBuilt()`
+   * itself, in the right order, before every `start()`. Getting that ordering wrong
+   * produced a silent first note and no error.
+   *
+   * Returns an unsubscribe. Handlers may be async; they are awaited in registration
+   * order and their failures are swallowed, because a warm-up that fails should cost
+   * you the first note, not the transport.
+   */
+  onBeforeStart(handler: () => void | Promise<void>): () => void {
+    this._beforeStart.add(handler);
+    return () => this._beforeStart.delete(handler);
   }
 
   // ─── Events ───────────────────────────────────────────────────────────────────

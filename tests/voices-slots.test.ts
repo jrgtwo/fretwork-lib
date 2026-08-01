@@ -8,20 +8,43 @@ import {
 } from '../src/playback/voices/slots';
 
 describe('slots', () => {
-  it('lists all five slots in canonical order', () => {
+  it('lists every slot in canonical order', () => {
     expect(ALL_SLOT_IDS).toEqual([
       'acoustic-guitar',
       'electric-guitar',
+      'karoryfer-green-guitar',
+      'karoryfer-black-guitar',
+      'clean-amp',
+      'blues-amp',
+      'crunch-amp',
+      'lead-amp',
+      'metal-amp',
+      'surf-amp',
+      'ambient-amp',
       'acoustic-bass',
       'electric-bass',
       'acoustic-ukulele',
     ]);
   });
 
-  it('returns slots for each instrument', () => {
-    expect(getSlotsForInstrument('guitar')).toEqual(['acoustic-guitar', 'electric-guitar']);
-    expect(getSlotsForInstrument('bass')).toEqual(['acoustic-bass', 'electric-bass']);
-    expect(getSlotsForInstrument('ukulele')).toEqual(['acoustic-ukulele']);
+  // Properties, not three hardcoded lists. The literal version claimed guitar had two
+  // slots and went stale the moment the seven amp slots landed — it failed for being
+  // old, not for catching anything. These hold however many slots exist.
+  it('partitions every slot across the instruments, with none left over', () => {
+    const partitioned = [
+      ...getSlotsForInstrument('guitar'),
+      ...getSlotsForInstrument('bass'),
+      ...getSlotsForInstrument('ukulele'),
+    ];
+    expect([...partitioned].sort()).toEqual([...ALL_SLOT_IDS].sort());
+  });
+
+  it('files each slot under the instrument its own id parses to', () => {
+    for (const instrumentId of ['guitar', 'bass', 'ukulele'] as const) {
+      for (const slot of getSlotsForInstrument(instrumentId)) {
+        expect(parseSlotId(slot).instrumentId).toBe(instrumentId);
+      }
+    }
   });
 
   it('returns the first default slot id per instrument (acoustic first)', () => {

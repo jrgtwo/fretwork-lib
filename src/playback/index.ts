@@ -75,6 +75,7 @@ export {
   SAMPLE_PACKS,
   getSamplePack,
   detectSamplePack,
+  prefetchSampleBanks,
 } from './voices';
 export type {
   FretInstrumentId,

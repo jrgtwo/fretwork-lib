@@ -212,6 +212,26 @@ export class Voice implements GuitarInstrument {
     this._ensureBuilt();
   }
 
+  /**
+   * Build the graph and resolve once this voice can actually make a sound.
+   *
+   * `ensureBuilt()` only *starts* the sampler downloads — it returns immediately, so a
+   * note triggered straight after it fires into an unloaded `Sampler` and plays
+   * silently, with nothing to await and no error raised. `Metronome.start()` avoids
+   * that by awaiting `Tone.loaded()` itself, but any path that doesn't run the
+   * transport — auditioning a voice in an editor, previewing a cell — had no
+   * equivalent.
+   *
+   * Caveat worth knowing: `Tone.loaded()` is global. It resolves when *every* pending
+   * buffer is decoded, not only this voice's, so a second voice loading concurrently
+   * will delay it. That is the same guarantee `Metronome.start()` relies on, and Tone
+   * exposes no per-instrument equivalent.
+   */
+  async ready(): Promise<void> {
+    this._ensureBuilt();
+    await Tone.loaded();
+  }
+
   private _ensureBuilt(): void {
     if (this._synth) return;
     const src = this._preset.source;
@@ -564,9 +584,24 @@ export class Voice implements GuitarInstrument {
 
   /** Replace the active preset entirely. Same source kind reuses the synth. */
   swapPreset(next: VoicePreset): void {
-    if (next.source.kind !== this._preset.source.kind) {
+    // A change to the SOURCE cannot be applied in place: the synth (or the set of
+    // Tone.Samplers) is constructed once in `_ensureBuilt` and everything below only
+    // retunes existing nodes. So tear the graph down and rebuild it.
+    //
+    // `dispose()` leaves this instance reusable — it nulls every node and empties the
+    // chain, and `_ensureBuilt` reconnects to NotesBus (or the custom routing target)
+    // on the way back up. Rebuilding eagerly, rather than waiting for the next
+    // `play()`, so a sampler starts fetching immediately instead of dropping the first
+    // note; `_ensureBuilt` is idempotent, so play() is still safe.
+    //
+    // Only rebuild if it was already built: an untouched voice has nothing to tear
+    // down, and building here would construct an audio graph for a voice that has
+    // never made a sound.
+    if (!sameSource(this._preset.source, next.source)) {
+      const wasBuilt = this._synth !== null;
       this.dispose();
       this._preset = next;
+      if (wasBuilt) this._ensureBuilt();
       return;
     }
     this.updateSynthParams(extractSynthParams(next.source));
@@ -1252,6 +1287,30 @@ function sameEffectsShape(a: EffectsConfig | undefined, b: EffectsConfig | undef
     // gain changes go through the in-place path below.
     a?.cabIR?.url === b?.cabIR?.url
   );
+}
+
+/**
+ * Whether two sources can share one built graph.
+ *
+ * Not just a `kind` check. For a **sampler** the banks are baked into the constructed
+ * `Tone.Sampler`s, so a different pack — or a different `release` — needs new ones;
+ * comparing only the kind meant a pack switch was accepted as "in place" and then
+ * applied to nothing, leaving the previous samples sounding with no error anywhere.
+ *
+ * For synth sources the params are genuinely live (`updateSynthParams` writes them onto
+ * the existing node), so kind alone is the right test.
+ */
+function sameSource(a: VoiceSource, b: VoiceSource): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind !== 'sampler' || b.kind !== 'sampler') return true;
+  if ((a.release ?? 1) !== (b.release ?? 1)) return false;
+  if (a.samples.length !== b.samples.length) return false;
+  return a.samples.every((bank, i) => {
+    const other = b.samples[i];
+    const keys = Object.keys(bank);
+    if (keys.length !== Object.keys(other).length) return false;
+    return keys.every((note) => bank[note] === other[note]);
+  });
 }
 
 function extractSynthParams(source: VoiceSource): PluckSynthParams | FMSynthParams {

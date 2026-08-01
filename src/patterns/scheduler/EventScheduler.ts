@@ -146,6 +146,7 @@ export class EventScheduler {
   /** Comparison key for the last emitted active set. Used to dedupe emits. */
   private _activeKey = '';
   private _unsubStart: (() => void) | null = null;
+  private _unsubBeforeStart: (() => void) | null = null;
   private _unsubStop: (() => void) | null = null;
   private _tuning: TuningDef;
   private _capo: number;
@@ -156,11 +157,6 @@ export class EventScheduler {
   private _completeListeners = new Set<CompleteListener>();
   private _placementChangeListeners = new Set<PlacementChangeListener>();
   private _currentPlacementId: string | null = null;
-  /** requestAnimationFrame handle for the visual head-position loop. The loop reads
-   *  `Tone.Transport.seconds` (the actual audio playback position) and emits head
-   *  updates smoothly between scheduler ticks. Audio scheduling stays per-slice in
-   *  `_onTick` — this loop only drives the visual playhead. */
-  private _visualRafId: number | null = null;
   private _role: 'primary' | 'follower';
 
   constructor(opts: EventSchedulerOpts) {
@@ -182,6 +178,14 @@ export class EventScheduler {
     // TrackLane placement detection) each run their own self-contained rAF
     // reading Tone.Transport.ticks directly. Starting an orphan loop here
     // would just burn CPU without any subscribers.
+    // Warm the instrument before the metronome waits on buffer loads, so a
+    // sampler-backed voice is fetching by the time `Tone.loaded()` is awaited. Without
+    // this the caller had to call `ensureBuilt()` itself, in the right order, before
+    // every start — and getting it wrong produced a silent first note with no error.
+    this._unsubBeforeStart = this._metronome.onBeforeStart(() => {
+      this._instrument.ensureBuilt?.();
+    });
+
     this._unsubStart = this._metronome.on('start', () => {
       this._activeNow.clear();
       this._activeKey = '';
@@ -206,7 +210,6 @@ export class EventScheduler {
 
     // Clear active state when transport stops.
     this._unsubStop = this._metronome.on('stop', () => {
-      this._stopVisualLoop();
       this._stopActiveLoop();
       // Cancel any pre-scheduled events that haven't fired yet. Sample-accurate
       // — eliminates the "previous pattern bleeds into next" symptom.
@@ -221,6 +224,12 @@ export class EventScheduler {
       this._activeNow.clear();
       this._activeKey = '';
       this._emitActive();
+      // Same reset as the active set beside it: stopping ends playback, so there is
+      // no "current placement" any more. Without this the id stays at whatever was
+      // last under the head and a consumer highlighting it keeps that highlight lit
+      // for the rest of the session — the poll that would correct it only runs while
+      // the transport is moving.
+      this._emitPlacementChange(null);
       this._emitHead(0);
       try {
         this._instrument.releaseAll();
@@ -435,7 +444,6 @@ export class EventScheduler {
   // ─── Cleanup ───────────────────────────────────────────────────────────────
 
   dispose(): void {
-    this._stopVisualLoop();
     this._stopActiveLoop();
     const disposeTransport = Tone.getTransport();
     for (const id of this._scheduledIds) {
@@ -451,6 +459,8 @@ export class EventScheduler {
       this._scheduledId = null;
     }
     this._unsubStart?.();
+    this._unsubBeforeStart?.();
+    this._unsubBeforeStart = null;
     this._unsubStart = null;
     this._unsubStop?.();
     this._unsubStop = null;
@@ -468,13 +478,28 @@ export class EventScheduler {
 
   // ─── Test seam ─────────────────────────────────────────────────────────────
 
-  /** Drive one slice synchronously. Legacy test seam from the slice-based
-   *  architecture. Now a no-op — audio scheduling happens via
-   *  _scheduleAllEvents at play start, not per-slice. Kept so existing tests
-   *  still compile; rewrite those tests to assert on _scheduledIds + the
-   *  scheduled callbacks instead. */
-  _tickForTest(_audioTime: number): void {
-    // no-op
+  /**
+   * Poll the transport once, synchronously — the test seam for active-event and
+   * placement-change emission.
+   *
+   * Audio scheduling is NOT driven from here: `_scheduleAllEvents` pre-schedules
+   * everything at play start, so there are no per-slice audio callbacks to pump. What
+   * this drives is the observation side, which otherwise only runs inside a
+   * `requestAnimationFrame` loop that a synchronous test can never reach.
+   *
+   * It was a literal `// no-op` for a while, left behind by the move off the
+   * slice-based architecture. Tests kept calling it and kept asserting on emissions
+   * that could no longer happen — failing for the seam being hollow rather than for
+   * anything being wrong.
+   *
+   * Takes the tick to poll at, because the transport cannot supply one under jsdom —
+   * with no AudioContext its `ticks` and `PPQ` are `undefined`. Everything downstream
+   * of the position (loop wrapping, the active-set scan, the dedupe) still runs on the
+   * real path; only the transport read is bypassed. Omit the argument to read the
+   * transport as production does.
+   */
+  _tickForTest(tick?: number): void {
+    this._pollActive(tick);
   }
 
   // ─── Internal ──────────────────────────────────────────────────────────────
@@ -664,6 +689,67 @@ export class EventScheduler {
    *
    *  Cost is O(events) per frame — for typical stream sizes (<500 events)
    *  this is sub-millisecond. */
+  /**
+   * One poll of the transport: recompute the active set and the current placement,
+   * emitting only on change.
+   *
+   * Split out of the rAF loop below so it can be driven directly. The loop itself is
+   * unreachable from a synchronous test — it needs a real frame — which is why
+   * `_tickForTest` exists and why it must call *this*, not schedule anything.
+   */
+  /** The transport's position, converted into our PPQ domain. */
+  private _transportTick(): number {
+    const transport = Tone.getTransport();
+    const transportPpq = transport.PPQ || PPQ;
+    return (transport.ticks * PPQ) / transportPpq;
+  }
+
+  private _pollActive(tickOverride?: number): void {
+    const stream = this._stream;
+    if (!stream || stream.durationTicks <= 0) return;
+    let tickPos = tickOverride ?? this._transportTick();
+    // Without an AudioContext the transport is an inert stub whose `ticks` and `PPQ`
+    // read `undefined`, so this arrives as NaN — which then compares false against
+    // every boundary and silently reports nothing active and no placement. Bail
+    // loudly-ish instead of pretending the head is somewhere.
+    if (!Number.isFinite(tickPos)) return;
+    if (this._loop) {
+      const region = this._resolveRegion();
+      tickPos = wrapTick(tickPos, region.start, region.end);
+    }
+
+    // Compute active set + a comparison key in one pass.
+    let newKey = '';
+    const newActive = new Map<string, ScheduledEvent>();
+    const events = stream.eventsInRange(0, stream.durationTicks);
+    for (const e of events) {
+      const end = e.startTick + e.durationTicks;
+      if (e.startTick <= tickPos && tickPos < end) {
+        newActive.set(e.id, e);
+        newKey += e.id + ',';
+      }
+    }
+
+    if (newKey !== this._activeKey) {
+      this._activeKey = newKey;
+      this._activeNow = newActive;
+      this._emitActive();
+    }
+
+    // Placement-change tracking (cheap; _emitPlacementChange dedupes).
+    this._emitPlacementChange(this._placementAtTick(tickPos));
+
+    // The visual head. Emitted from here rather than from a loop of its own: this
+    // already reads the transport once per frame and has already folded the position
+    // back into the loop region, so a second rAF would duplicate both and could
+    // disagree with the highlight it sits beside.
+    //
+    // There used to be a `_visualRafId` loop for this that nothing ever started —
+    // only `_stopVisualLoop` existed — so `onHead` never fired during playback and
+    // every consumer had to run its own rAF and read `Tone.Transport` directly.
+    this._emitHead(tickPos);
+  }
+
   private _startActiveLoop(): void {
     if (this._activeRafId !== null) return;
     if (typeof requestAnimationFrame === 'undefined') return;
@@ -672,40 +758,7 @@ export class EventScheduler {
         this._activeRafId = null;
         return;
       }
-      const stream = this._stream;
-      if (!stream || stream.durationTicks <= 0) {
-        this._activeRafId = requestAnimationFrame(loop);
-        return;
-      }
-      const transport = Tone.getTransport();
-      const transportPpq = transport.PPQ || PPQ;
-      let tickPos = (transport.ticks * PPQ) / transportPpq;
-      if (this._loop) {
-        const region = this._resolveRegion();
-        tickPos = wrapTick(tickPos, region.start, region.end);
-      }
-
-      // Compute active set + a comparison key in one pass.
-      let newKey = '';
-      const newActive = new Map<string, ScheduledEvent>();
-      const events = stream.eventsInRange(0, stream.durationTicks);
-      for (const e of events) {
-        const end = e.startTick + e.durationTicks;
-        if (e.startTick <= tickPos && tickPos < end) {
-          newActive.set(e.id, e);
-          newKey += e.id + ',';
-        }
-      }
-
-      if (newKey !== this._activeKey) {
-        this._activeKey = newKey;
-        this._activeNow = newActive;
-        this._emitActive();
-      }
-
-      // Placement-change tracking (cheap; _emitPlacementChange dedupes).
-      this._emitPlacementChange(this._placementAtTick(tickPos));
-
+      this._pollActive();
       this._activeRafId = requestAnimationFrame(loop);
     };
     this._activeRafId = requestAnimationFrame(loop);
@@ -715,13 +768,6 @@ export class EventScheduler {
     if (this._activeRafId !== null) {
       cancelAnimationFrame(this._activeRafId);
       this._activeRafId = null;
-    }
-  }
-
-  private _stopVisualLoop(): void {
-    if (this._visualRafId !== null) {
-      cancelAnimationFrame(this._visualRafId);
-      this._visualRafId = null;
     }
   }
 

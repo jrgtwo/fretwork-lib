@@ -11,6 +11,7 @@ import { NoteMarker } from './NoteMarker';
 import { VIEWBOX_H, VIEWBOX_W, NECK_X, NECK_LENGTH, TOP_PAD, STRING_AREA, getStringSpacing } from './layout';
 import { usePlaybackStore } from '../../playback/usePlaybackStore';
 import { cellsEqual } from '../../playback/types';
+import type { Playback } from '../../playback/Playback';
 import { useFretboardModel } from './useFretboardModel';
 
 // Set of fret numbers that always show a marker in inlayGrid mode: open strings
@@ -60,6 +61,10 @@ export interface FretboardProps {
    * deriving them from `useFretworkStore`. Consumers that drive highlights from
    * a non-global source (e.g., the pattern editor's pattern-specific key) pass
    * this. Has no effect in `neutralGrid` mode.
+   *
+   * Omitted and empty are different: omit to derive from the global store, pass
+   * `[]` to draw no highlights at all (a bare neck, or a board that shows only
+   * its own `footprintCells` / `activeCells`).
    */
   highlights?: readonly Highlight[];
   /**
@@ -69,6 +74,10 @@ export interface FretboardProps {
    * exclusive with `neutralGrid`. Used by the Patterns editor's fretboard
    * input when the pattern has a key set — in-key cells stand out by color,
    * out-of-key cells stay clickable but visually de-emphasized.
+   *
+   * `activeCells` and `footprintCells` keep their own (brighter) treatment on top
+   * of the filler. Because this renders every cell, pass a memoized `highlights`
+   * array: an inline literal re-derives the whole grid on every render.
    */
   dimNonHighlighted?: boolean;
   /**
@@ -80,6 +89,23 @@ export interface FretboardProps {
    * when the pattern has no key set.
    */
   inlayGrid?: boolean;
+  /**
+   * Overrides the derived `aria-label` on the SVG. The default describes the
+   * global key/type/tuning, which is wrong for a board showing something else
+   * (a pattern footprint, a bare neck). Pass what the board actually shows.
+   */
+  ariaLabel?: string;
+  /**
+   * The app's `Playback` instance, for the legacy click-to-program path
+   * (`isProgramming` + no `onCellClickOverride`). The component never builds one of
+   * its own — a board that is only being looked at must not spin up an audio engine.
+   *
+   * BREAKING vs. earlier versions, which built the shared Practice singleton here:
+   * omit it and clicks still mirror into `usePlaybackStore` (so the numbered badges
+   * appear), but NO engine records them and the sequence will not play back. Apps
+   * using the legacy programming mode must pass their own `usePlayback().playback`.
+   */
+  playback?: Playback | null;
 }
 
 export function Fretboard({
@@ -91,7 +117,9 @@ export function Fretboard({
   highlights: highlightsProp,
   dimNonHighlighted,
   inlayGrid,
-}: FretboardProps = {}) {
+  ariaLabel,
+  playback: playbackProp,
+}: FretboardProps) {
   const {
     instrumentId,
     fretCount,
@@ -106,6 +134,7 @@ export function Fretboard({
     openStrings,
     renderHighlights,
     renderedKeys,
+    dimmedKeys,
     inShapeKeys,
     activeCellKeys,
     playheadCell,
@@ -120,6 +149,7 @@ export function Fretboard({
     dimNonHighlighted,
     activeCells,
     footprintCells,
+    playback: playbackProp,
   });
 
   const onCellClick = useCallback(
@@ -151,7 +181,7 @@ export function Fretboard({
         viewBox={`0 0 ${VIEWBOX_W} ${VIEWBOX_H}`}
         preserveAspectRatio="xMidYMid meet"
         role="img"
-        aria-label={`Fretboard showing ${effectiveKey} ${type} in ${tuning.name}`}
+        aria-label={ariaLabel ?? `Fretboard showing ${effectiveKey} ${type} in ${tuning.name}`}
         className="w-full min-w-[820px] h-auto select-none"
         style={{ filter: 'drop-shadow(0 30px 40px rgba(0,0,0,0.35))' }}
       >
@@ -256,14 +286,25 @@ export function Fretboard({
               }
             }
           }
-          // CAGED shape filter — only applies in the standard (non-neutral) mode.
-          const inShape = inShapeKeys ? inShapeKeys.has(cellKey) : true;
-          if (!inShape && !settings.showGhostMarkers) return null;
+          // dimNonHighlighted fills the render set out to the whole grid; those
+          // filler cells are the "rest" the prop promises to fade. They carry no
+          // theory claim, so the CAGED filter doesn't apply to them either.
+          const dimmed = dimmedKeys?.has(cellKey) ?? false;
 
-          // NeutralGrid forces every cell to render as a neutral tone; other modes
-          // use the highlight's own degree styling.
-          const effectiveLabels = neutralGrid ? 'notes' : labels;
-          const effectiveSettings = neutralGrid
+          // CAGED shape filter — only applies in the standard (non-neutral) mode.
+          const inShape = dimmed || !inShapeKeys || inShapeKeys.has(cellKey);
+          const hiddenByShape = !inShape && !settings.showGhostMarkers;
+          // dimNonHighlighted promises a complete grid, so a CAGED-hidden highlight
+          // degrades to filler there rather than leaving a hole its non-highlighted
+          // neighbours don't have.
+          if (hiddenByShape && !dimNonHighlighted) return null;
+
+          const asFiller = dimmed || hiddenByShape;
+          // NeutralGrid (and the dim filler) force a cell to render as a neutral
+          // tone; other modes use the highlight's own degree styling.
+          const neutralStyling = neutralGrid || asFiller;
+          const effectiveLabels = neutralStyling ? 'notes' : labels;
+          const effectiveSettings = neutralStyling
             ? { ...settings, colorByDegree: false, highlightRoot: false }
             : settings;
 
@@ -288,7 +329,8 @@ export function Fretboard({
                       )
                   : undefined
               }
-              ghosted={!inShape}
+              ghosted={!inShape && !asFiller}
+              dimmed={asFiller}
             />
           );
         })}
@@ -325,11 +367,11 @@ export function Fretboard({
           />
         ))}
 
-        {(inlayGrid || dimNonHighlighted) && hoverCell &&
+        {inlayGrid && hoverCell &&
           !renderedKeys.has(`${hoverCell.stringIndex}:${hoverCell.fret}`) && (() => {
           // Build a synthetic Highlight for the hovered cell — provides a "where would
-          // I stamp?" preview for cells that aren't already rendered (out-of-key in
-          // dim mode; any non-inlay cell in inlay-only mode). Wrap in
+          // I stamp?" preview for the non-inlay cells inlayGrid leaves undrawn. Dim
+          // mode has no use for it: it draws every cell already. Wrap in
           // pointer-events:none so the marker itself doesn't intercept mouse events
           // from the underlying click-target rect, which would otherwise cause a
           // hover-flicker loop.
