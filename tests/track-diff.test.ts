@@ -43,6 +43,28 @@ describe('diffTracks', () => {
     expect(diffTracks(prev, next)[0].action).toBe('gain');
   });
 
+  /* CP-19: pan rides the same audio-rate node family as volume/mute/solo, so
+     it belongs in the gain bucket. Both 'gain' and 'none' fall through to
+     `applyTrackState`, so the sound is the same either way — what this pins is
+     that pan is never read as something HEAVIER, which is the restream path. */
+  it('flags a pan change as gain', () => {
+    const prev = oneTrackComp();
+    const next = {
+      ...prev,
+      tracks: prev.tracks.map((t) => ({ ...t, pan: -0.5 })),
+    };
+    expect(diffTracks(prev, next)[0].action).toBe('gain');
+  });
+
+  it('still flags a placements change as restream when pan changed too', () => {
+    const prev = oneTrackComp();
+    const next = {
+      ...prev,
+      tracks: prev.tracks.map((t) => ({ ...t, pan: 1, placements: [...t.placements] })),
+    };
+    expect(diffTracks(prev, next)[0].action).toBe('restream');
+  });
+
   it('flags an unchanged track as none', () => {
     const prev = oneTrackComp();
     expect(diffTracks(prev, prev)[0].action).toBe('none');

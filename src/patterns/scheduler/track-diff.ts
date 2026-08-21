@@ -14,7 +14,7 @@ export interface TrackDiff {
 }
 
 /** Priority: placement content change > voice/instrument change > gain-state
- *  change (volume/mute/solo) > none. A track present in `next` but not `prev`
+ *  change (volume/pan/mute/solo) > none. A track present in `next` but not `prev`
  *  is treated as `restream` (defensive; the caller normally rebuilds on a
  *  structural change before reaching here). */
 export function diffTracks(prev: Composition, next: Composition): TrackDiff[] {
@@ -27,6 +27,10 @@ export function diffTracks(prev: Composition, next: Composition): TrackDiff[] {
       action = 'voice';
     } else if (
       t.volumeDb !== p.volumeDb ||
+      // `?? 0` on both sides: a track persisted before CP-19 has no `pan` at
+      // all, so a raw !== would read undefined -> 0 as a change on the first
+      // update after load and bill a gain op for nothing.
+      (t.pan ?? 0) !== (p.pan ?? 0) ||
       t.muted !== p.muted ||
       t.soloed !== p.soloed
     ) {

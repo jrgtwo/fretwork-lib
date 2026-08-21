@@ -19,6 +19,7 @@ import {
   setPlacementTranspose,
   resizePlacement,
   setCompositionLoop,
+  setTrackPan,
   ticksPerBar,
   PPQ,
 } from '../src/patterns';
@@ -898,5 +899,65 @@ describe('setPlacementTranspose / resizePlacement / setCompositionLoop', () => {
     comp = setCompositionLoop(comp, true);
     expect(comp.loop).toBe(true);
     expect(setCompositionLoop(comp, true)).toBe(comp);
+  });
+});
+
+/**
+ * Per-track pan (CP-19). Pan is the missing half of a pair volume already has
+ * in both places: the voice preset carries its own stereo image, and the TRACK
+ * carries where that voice sits in the mix. These cover the op only — the
+ * `Tone.Panner` it feeds is asserted through `applyTrackState` in the playback
+ * suite.
+ */
+describe('setTrackPan', () => {
+  function comp() {
+    return addPlacement(createEmptyComposition('c'), createEmptyPattern()).composition;
+  }
+
+  it('defaults a new track to centre', () => {
+    expect(comp().tracks[0].pan ?? 0).toBe(0);
+  });
+
+  it('sets the value on the addressed track', () => {
+    const c = comp();
+    expect(setTrackPan(c, c.tracks[0].id, -0.5).tracks[0].pan).toBe(-0.5);
+  });
+
+  it('clamps to the panner range rather than passing a wild value through', () => {
+    const c = comp();
+    expect(setTrackPan(c, c.tracks[0].id, 4).tracks[0].pan).toBe(1);
+    expect(setTrackPan(c, c.tracks[0].id, -4).tracks[0].pan).toBe(-1);
+  });
+
+  it('coerces a non-finite value to centre — NaN reaching a Panner is silent and permanent', () => {
+    const c = comp();
+    expect(setTrackPan(c, c.tracks[0].id, Number.NaN).tracks[0].pan).toBe(0);
+  });
+
+  it('leaves the placements array IDENTITY untouched', () => {
+    // `diffTracks` reads placements by reference: a new array here would be
+    // read as a content change and restream the track mid-drag, cancelling
+    // the running schedule. This is the assertion that keeps a pan drag
+    // inaudible-free.
+    const c = comp();
+    const next = setTrackPan(c, c.tracks[0].id, 0.75);
+    expect(next.tracks[0].placements).toBe(c.tracks[0].placements);
+  });
+
+  it('does not mutate the input composition', () => {
+    const c = comp();
+    setTrackPan(c, c.tracks[0].id, 0.75);
+    expect(c.tracks[0].pan ?? 0).toBe(0);
+  });
+
+  it('leaves other tracks alone', () => {
+    const c = addTrack(comp(), 'Track 2');
+    const next = setTrackPan(c, c.tracks[0].id, 1);
+    expect(next.tracks[1].pan ?? 0).toBe(0);
+  });
+
+  it('returns the composition unchanged for an unknown track id', () => {
+    const c = comp();
+    expect(setTrackPan(c, 'nope', 1).tracks).toEqual(c.tracks);
   });
 });

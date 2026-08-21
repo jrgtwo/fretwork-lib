@@ -3,13 +3,18 @@
  * a Composition.
  *
  * For each `Composition.Track` this builds a (Voice, per-track Gain,
- * EventScheduler) tuple. Audio flows:
+ * per-track Panner, EventScheduler) tuple. Audio flows:
  *
- *   Voice[i] → trackGain[i] → masterGain → MasterBus
+ *   Voice[i] → trackGain[i] → trackPanner[i] → masterGain → MasterBus
  *
  * Per-track `volumeDb`, `muted`, and `soloed` flags translate into the
  * track gain's linear value. Solo follows standard DAW semantics: if any
  * track is soloed, every non-soloed track is silenced.
+ *
+ * `pan` (CP-19) is the same shape one node later. Note that a Voice carries
+ * its OWN pan and volume inside its preset, and both stack with the track's:
+ * the preset's pair describe the sound, the track's pair describe where that
+ * sound sits in this mix.
  *
  * One scheduler is the "primary" — its head / active / placement-change
  * callbacks drive the UI. The non-primary schedulers play their notes
@@ -17,7 +22,7 @@
  * their own voice chain.
  *
  * The implementation does NOT subscribe to the store directly. Live
- * updates (volume slider drag, mute toggle) come in via `applyTrackState`
+ * updates (volume or pan drag, mute toggle) come in via `applyTrackState`
  * which the host hook calls whenever the underlying composition slice
  * changes.
  */
@@ -48,7 +53,7 @@ export interface MultiTrackPlaybackOpts {
   capo: number;
   /** Factory: caller builds a Voice instance for each Track. The Voice is
    *  expected to have `autoConnectToMaster: false` so this manager can
-   *  insert the per-track Gain. */
+   *  insert the per-track Gain and Panner. */
   buildVoice: BuildVoiceForTrack;
 }
 
@@ -57,6 +62,10 @@ interface TrackEntry {
   scheduler: EventScheduler;
   voice: ReturnType<BuildVoiceForTrack>;
   gain: Tone.Gain;
+  /** Per-track stereo position, downstream of `gain`. The VOICE may carry a
+   *  pan of its own (`preset.level.pan`); the two stack, the same way the two
+   *  volumes do. */
+  panner: Tone.Panner;
 }
 
 const NEG_INF_GAIN = 0.0001; // ~-80 dB; effectively silent without -Infinity quirks
@@ -90,6 +99,10 @@ export class MultiTrackPlayback {
     for (const track of opts.composition.tracks ?? []) {
       const voice = opts.buildVoice(track);
       const gain = new Tone.Gain(0); // start silent; applyTrackState below sets real value
+      // Gain BEFORE pan, matching a console strip: the fader sets how much,
+      // the pot sets where. Constructed at centre and given its real value by
+      // `applyTrackState` below, alongside the gain.
+      const panner = new Tone.Panner(0);
       voice.setRoutingTarget(gain);
       // Build the voice's synth + chain eagerly so any Sampler buffer loads
       // begin now rather than on the first triggerAttackRelease. Without
@@ -98,7 +111,8 @@ export class MultiTrackPlayback {
       // metronome.start() then waits for the buffers to be ready before
       // transport begins, eliminating the silent-first-notes symptom.
       voice.ensureBuilt();
-      gain.connect(this._masterGain);
+      gain.connect(panner);
+      panner.connect(this._masterGain);
       const scheduler = new EventScheduler({
         metronome: opts.metronome,
         instrument: voice,
@@ -121,14 +135,14 @@ export class MultiTrackPlayback {
       );
       scheduler.setStream(stream);
 
-      this._entries.push({ trackId: track.id, scheduler, voice, gain });
+      this._entries.push({ trackId: track.id, scheduler, voice, gain, panner });
     }
     this.applyTrackState();
   }
 
   /**
-   * Push the current composition's per-track volume / mute / solo flags
-   * into the audio-rate Gains. Cheap; safe to call on every store change.
+   * Push the current composition's per-track volume / pan / mute / solo flags
+   * into the audio-rate nodes. Cheap; safe to call on every store change.
    */
   applyTrackState(): void {
     const anySoloed = this._composition.tracks.some((t) => t.soloed);
@@ -138,6 +152,11 @@ export class MultiTrackPlayback {
       const audible = !track.muted && (!anySoloed || track.soloed);
       const target = audible ? dbToLinearGain(track.volumeDb ?? 0) : NEG_INF_GAIN;
       entry.gain.gain.rampTo(target, 0.02); // 20 ms ramp avoids clicks
+      // Ramped for the same reason the gain is: this is dragged, and a stepped
+      // pan zippers audibly. `?? 0` because a track persisted before CP-19 has
+      // no `pan` — an undefined here is a NaN the Panner never recovers from.
+      const pan = track.pan ?? 0;
+      entry.panner.pan.rampTo(Number.isFinite(pan) ? pan : 0, 0.02);
     }
   }
 
@@ -263,6 +282,12 @@ export class MultiTrackPlayback {
         // already disconnected
       }
       entry.gain.dispose();
+      try {
+        entry.panner.disconnect();
+      } catch {
+        // already disconnected
+      }
+      entry.panner.dispose();
     }
     this._entries = [];
     try {

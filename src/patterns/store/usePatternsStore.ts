@@ -81,6 +81,7 @@ import {
   setTrackInstrument as opsSetTrackInstrument,
   setTrackVoiceRef as opsSetTrackVoiceRef,
   setTrackVolumeDb as opsSetTrackVolumeDb,
+  setTrackPan as opsSetTrackPan,
   setTrackMuted as opsSetTrackMuted,
   setTrackSoloed as opsSetTrackSoloed,
   setMasterVolumeDb as opsSetMasterVolumeDb,
@@ -319,6 +320,8 @@ export interface PatternsActions {
   /** Set a per-track voice-variant override (or null to follow the global active). */
   setCompositionTrackVoiceRef(trackId: string, voiceRef: unknown | null): void;
   setCompositionTrackVolumeDb(trackId: string, volumeDb: number): void;
+  /** Stereo position for one track. -1 hard left, 0 centre, +1 hard right. */
+  setCompositionTrackPan(trackId: string, pan: number): void;
   setCompositionTrackMuted(trackId: string, muted: boolean): void;
   setCompositionTrackSoloed(trackId: string, soloed: boolean): void;
   setCompositionMasterVolumeDb(masterVolumeDb: number): void;
@@ -1631,6 +1634,9 @@ export const usePatternsStore = create<PatternsStoreState>()(
       },
       setCompositionTrackVolumeDb(trackId, volumeDb) {
         applyComposition(set, get, (comp) => opsSetTrackVolumeDb(comp, trackId, volumeDb));
+      },
+      setCompositionTrackPan(trackId, pan) {
+        applyComposition(set, get, (comp) => opsSetTrackPan(comp, trackId, pan));
       },
       setCompositionTrackMuted(trackId, muted) {
         applyComposition(set, get, (comp) => opsSetTrackMuted(comp, trackId, muted));

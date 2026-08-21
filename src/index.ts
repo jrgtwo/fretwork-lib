@@ -245,6 +245,7 @@ export {
   setTrackInstrument,
   setTrackVoiceRef,
   setTrackVolumeDb,
+  setTrackPan,
   setTrackMuted,
   setTrackSoloed,
   setMasterVolumeDb,

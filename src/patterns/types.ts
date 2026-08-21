@@ -346,7 +346,7 @@ export interface Pattern {
  *
  * Mute / solo follow standard DAW semantics: any soloed track silences
  * non-soloed tracks; mute is independent. Both ride on a per-track
- * audio-rate gain so toggling them doesn't click.
+ * audio-rate gain so toggling them doesn't click, as does `pan`.
  */
 export interface Track {
   id: string;
@@ -365,6 +365,22 @@ export interface Track {
   voiceRef?: unknown | null;
   /** Per-track volume in dB. 0 = unity. Range typically -60..+6.  */
   volumeDb: number;
+  /**
+   * Where this track sits in the stereo field. -1 = hard left, 0 = centre,
+   * +1 = hard right. Feeds a per-track `Tone.Panner` in `MultiTrackPlayback`,
+   * downstream of the per-track gain.
+   *
+   * The VOICE has a pan of its own (`preset.level.pan`) and the two stack,
+   * exactly as the two volumes do: the voice's is part of the sound's own
+   * stereo image, this one is where that sound is placed in the mix.
+   *
+   * OPTIONAL on purpose, unlike `volumeDb`. Every track persisted before
+   * CP-19 arrives without it, and `migrateCompositionToTracks` returns an
+   * already-populated composition UNCHANGED — so there is no upgrade pass
+   * that could backfill it. Read it as `?? 0` at every use; an undefined
+   * reaching a Panner's `pan` is a silent NaN that never recovers.
+   */
+  pan?: number;
   muted: boolean;
   soloed: boolean;
   /** This track's placements — each placement points to a deep-copied

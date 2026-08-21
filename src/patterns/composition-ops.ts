@@ -71,6 +71,7 @@ export function createEmptyTrack(
     name,
     instrumentId,
     volumeDb: 0,
+    pan: 0,
     muted: false,
     soloed: false,
     placements: [],
@@ -280,6 +281,30 @@ export function setTrackVolumeDb(
   return {
     ...comp,
     tracks: replaceTrack(comp.tracks, trackId, (t) => ({ ...t, volumeDb: clamped })),
+    updatedAt: Date.now(),
+  };
+}
+
+/**
+ * Place a track in the stereo field. -1 hard left, 0 centre, +1 hard right.
+ *
+ * The mirror of `setTrackVolumeDb`, and deliberately shaped like it: the value
+ * is clamped HERE rather than at the audio node, so a caller reading the stored
+ * value back gets the number that is actually playing.
+ *
+ * Non-finite input collapses to centre. A NaN reaching `Panner.pan` is not an
+ * error — the node keeps its last value and the track silently stops responding
+ * to the control, which is a far worse failure than being re-centred.
+ *
+ * Note what this does NOT touch: `t.placements` keeps its array identity, so
+ * `diffTracks` reads a pan drag as a gain-state change rather than a content
+ * change. A new array here would restream the track on every pointer move.
+ */
+export function setTrackPan(comp: Composition, trackId: string, pan: number): Composition {
+  const clamped = Number.isFinite(pan) ? Math.max(-1, Math.min(1, pan)) : 0;
+  return {
+    ...comp,
+    tracks: replaceTrack(comp.tracks, trackId, (t) => ({ ...t, pan: clamped })),
     updatedAt: Date.now(),
   };
 }
