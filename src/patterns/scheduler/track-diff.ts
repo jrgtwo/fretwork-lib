@@ -31,6 +31,12 @@ export function diffTracks(prev: Composition, next: Composition): TrackDiff[] {
       // all, so a raw !== would read undefined -> 0 as a change on the first
       // update after load and bill a gain op for nothing.
       (t.pan ?? 0) !== (p.pan ?? 0) ||
+      // Input gain is a GAIN-state change, not a voice change: the voice ramps
+      // it in place (`updateInputGain`) and rebuilding one to move a fader
+      // would reload its sample banks and drop the notes already ringing.
+      // `?? 0` on both sides for `pan`'s reason — a track saved before this
+      // field existed must not read as changed on the first update after load.
+      (t.inputGainDb ?? 0) !== (p.inputGainDb ?? 0) ||
       t.muted !== p.muted ||
       t.soloed !== p.soloed
     ) {

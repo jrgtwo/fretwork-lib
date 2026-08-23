@@ -43,6 +43,15 @@ export interface BuildVoiceForTrack {
     setRoutingTarget(target: Tone.ToneAudioNode | null): void;
     ensureBuilt(): void;
     dispose(): void;
+    /**
+     * Drive the front of the voice's chain, in dB — `Track.inputGainDb`.
+     *
+     * OPTIONAL so an instrument that is not a full `Voice` (a test double, the
+     * PluckSynth default) still satisfies this type. A track carrying an input
+     * gain that reaches an instrument without the method simply plays at the
+     * preset's level, which is what it did before the field existed.
+     */
+    updateInputGain?(inputGainDb: number | undefined): void;
   };
 }
 
@@ -157,6 +166,16 @@ export class MultiTrackPlayback {
       // no `pan` — an undefined here is a NaN the Panner never recovers from.
       const pan = track.pan ?? 0;
       entry.panner.pan.rampTo(Number.isFinite(pan) ? pan : 0, 0.02);
+      // Input gain is pushed from HERE, with the fader and the pan, even though
+      // it lands inside the voice rather than on one of this class's own nodes.
+      // It belongs to the same job — "make the audio match the track" — and the
+      // voice ramps it in place, so a change costs no rebuild.
+      //
+      // Passed through UNDEFINED-preserving: `?? 0` would be wrong. Undefined
+      // means "the preset decides" and 0 means "unity, whatever the preset
+      // said", and a track that has never had an input gain set must not
+      // silently override every preset's own value with unity.
+      entry.voice.updateInputGain?.(track.inputGainDb);
     }
   }
 
@@ -176,6 +195,12 @@ export class MultiTrackPlayback {
     entry.scheduler.setInstrument(next);
     const old = entry.voice;
     entry.voice = next;
+    // The new voice starts at its PRESET's input gain, and the track's own
+    // value has to be put back on top of it. Without this, swapping the amp
+    // silently resets the input level — which is the exact defect the field
+    // exists to fix, reintroduced at the one moment the user is most likely to
+    // notice it.
+    next.updateInputGain?.(track.inputGainDb);
     // Keep the old voice alive long enough for sustaining notes to ring out,
     // then dispose. A fixed tail is fine for v1 (see design doc).
     const TAIL_MS = 4000;

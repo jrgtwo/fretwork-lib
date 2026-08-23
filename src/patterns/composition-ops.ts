@@ -309,6 +309,40 @@ export function setTrackPan(comp: Composition, trackId: string, pan: number): Co
   };
 }
 
+/**
+ * Bounds for {@link setTrackInputGainDb}, matching the voice's own input gain.
+ *
+ * -80 dB grounds the signal; +24 dB is a hot boost into the saturators. Exported
+ * so a UI control and an agent tool take their range from the audio engine
+ * rather than restating it and drifting.
+ */
+export const TRACK_INPUT_GAIN_RANGE_DB = { min: -80, max: 24 } as const;
+
+/**
+ * Set how hard a track drives its voice, in dB, at the front of the chain.
+ *
+ * See `Track.inputGainDb`. Non-finite collapses to unity rather than reaching a
+ * gain node as NaN, which is silent and unrecoverable — the same guard
+ * {@link setTrackPan} takes for the same reason.
+ */
+export function setTrackInputGainDb(
+  comp: Composition,
+  trackId: string,
+  inputGainDb: number,
+): Composition {
+  const clamped = Number.isFinite(inputGainDb)
+    ? Math.max(
+        TRACK_INPUT_GAIN_RANGE_DB.min,
+        Math.min(TRACK_INPUT_GAIN_RANGE_DB.max, inputGainDb),
+      )
+    : 0;
+  return {
+    ...comp,
+    tracks: replaceTrack(comp.tracks, trackId, (t) => ({ ...t, inputGainDb: clamped })),
+    updatedAt: Date.now(),
+  };
+}
+
 export function setTrackMuted(comp: Composition, trackId: string, muted: boolean): Composition {
   return {
     ...comp,

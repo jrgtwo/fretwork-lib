@@ -381,6 +381,33 @@ export interface Track {
    * reaching a Panner's `pan` is a silent NaN that never recovers.
    */
   pan?: number;
+  /**
+   * How hard this track drives its own voice, in dB, applied at the very FRONT
+   * of the voice chain — ahead of the pedals, the EQ and the amp.
+   *
+   * This is the amp-sim input control, and it is on the TRACK on purpose. The
+   * same value lives on a `VoicePreset` (`inputGainDb`), but a preset is chosen
+   * and swapped: pick a different amp for the track and you load a different
+   * preset, so an input level stored there changes every time you audition a
+   * voice. Here it survives the swap, which is the point — you set how hard the
+   * instrument hits the amp once, then try amps underneath it.
+   *
+   * When set, it OVERRIDES the preset's own value rather than stacking with it.
+   * Two gains in series at the same point in the chain would be two things to
+   * get wrong for one job.
+   *
+   * NOT the track fader. `volumeDb` is downstream of the whole voice, so it
+   * changes how loud the amp's output is; this changes how hard the amp is
+   * driven. Turning the fader down on an overdriven track gives you a quieter
+   * copy of the same distortion.
+   *
+   * OPTIONAL for the reason `pan` is: every track persisted before this arrives
+   * without it and `migrateCompositionToTracks` returns an already-populated
+   * composition UNCHANGED, so nothing backfills it. Read it as `?? 0`, and note
+   * that undefined and 0 are NOT the same thing to the voice — undefined means
+   * "the preset decides", 0 means "unity, whatever the preset said".
+   */
+  inputGainDb?: number;
   muted: boolean;
   soloed: boolean;
   /** This track's placements — each placement points to a deep-copied

@@ -105,6 +105,8 @@ export {
   setTrackVoiceRef,
   setTrackVolumeDb,
   setTrackPan,
+  setTrackInputGainDb,
+  TRACK_INPUT_GAIN_RANGE_DB,
   setTrackMuted,
   setTrackSoloed,
   setMasterVolumeDb,
