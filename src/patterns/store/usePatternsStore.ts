@@ -82,6 +82,7 @@ import {
   setTrackVoiceRef as opsSetTrackVoiceRef,
   setTrackVolumeDb as opsSetTrackVolumeDb,
   setTrackPan as opsSetTrackPan,
+  setTrackInputGainDb as opsSetTrackInputGainDb,
   setTrackMuted as opsSetTrackMuted,
   setTrackSoloed as opsSetTrackSoloed,
   setMasterVolumeDb as opsSetMasterVolumeDb,
@@ -322,6 +323,10 @@ export interface PatternsActions {
   setCompositionTrackVolumeDb(trackId: string, volumeDb: number): void;
   /** Stereo position for one track. -1 hard left, 0 centre, +1 hard right. */
   setCompositionTrackPan(trackId: string, pan: number): void;
+  /** How hard one track drives its own voice, in dB, at the FRONT of the voice
+   *  chain — ahead of the pedals, the EQ and the amp. Not the fader, which sits
+   *  downstream of the whole voice and changes loudness rather than drive. */
+  setCompositionTrackInputGainDb(trackId: string, inputGainDb: number): void;
   setCompositionTrackMuted(trackId: string, muted: boolean): void;
   setCompositionTrackSoloed(trackId: string, soloed: boolean): void;
   setCompositionMasterVolumeDb(masterVolumeDb: number): void;
@@ -1637,6 +1642,9 @@ export const usePatternsStore = create<PatternsStoreState>()(
       },
       setCompositionTrackPan(trackId, pan) {
         applyComposition(set, get, (comp) => opsSetTrackPan(comp, trackId, pan));
+      },
+      setCompositionTrackInputGainDb(trackId, inputGainDb) {
+        applyComposition(set, get, (comp) => opsSetTrackInputGainDb(comp, trackId, inputGainDb));
       },
       setCompositionTrackMuted(trackId, muted) {
         applyComposition(set, get, (comp) => opsSetTrackMuted(comp, trackId, muted));
