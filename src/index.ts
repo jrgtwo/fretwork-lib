@@ -437,6 +437,16 @@ export {
   AMP_MODELS,
   getAmpModel,
   DEFAULT_AMP_MODEL_ID,
+  describeGainStructure,
+  GAIN_STRUCTURE_PROBE_INPUTS,
+} from './playback';
+export type {
+  GainStructure,
+  GainStructureStage,
+  GainStructureOptions,
+  ShaperResponse,
+  SmallSignalGainDb,
+  TrackLevels,
 } from './playback';
 export type { AbsoluteCell, CagedShape, CagedShapeId, CagedLetter, SamplePack, CabinetIR, AmpModel, AmpModelCategory } from './playback';
 export type {

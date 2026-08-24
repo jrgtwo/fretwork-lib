@@ -50,6 +50,16 @@ export {
 } from './voices/amp-models';
 export { MASTER_GAIN_MIN_DB, MASTER_GAIN_MAX_DB } from './voices/MasterBus';
 export {
+  describeGainStructure,
+  GAIN_STRUCTURE_PROBE_INPUTS,
+  type GainStructure,
+  type GainStructureStage,
+  type GainStructureOptions,
+  type ShaperResponse,
+  type SmallSignalGainDb,
+} from './voices/gain-structure';
+export { registerTrackLevelSource, type TrackLevels, type TrackLevelSource } from './audio-debug';
+export {
   Voice,
   MasterBus,
   VOICE_PRESETS,

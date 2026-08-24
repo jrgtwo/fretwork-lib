@@ -237,9 +237,14 @@ export interface CabIRParams {
 }
 
 /** Amplifier simulation. Sits between the pedalboard and the cabinet IR in
- *  the chain. Implemented as a 5-node stack: pre-gain → pre-amp saturation
- *  → tone stack (EQ3) → power-amp saturation → output gain. Together these
- *  give the clean→metal range from a single parameter shape — clean settings
+ *  the chain. Wired as: pre-gain → a 120 Hz bass split whose driven branch is
+ *  pre-amp saturation → power-amp saturation → merge → tone stack (EQ3) →
+ *  presence shelf → output gain.
+ *
+ *  **The tone stack is after BOTH saturators.** This comment described it as
+ *  sitting between them until AF-01; the wiring in `Voice.wireChain` has always
+ *  been the above. Together these give the clean→metal range from a single
+ *  parameter shape — clean settings
  *  use low drive on both stages, crunch uses moderate pre-drive, metal uses
  *  high pre-drive plus moderate power-amp coloration.
  *

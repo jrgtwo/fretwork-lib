@@ -11,12 +11,20 @@
  *   1. CURVE — `(drive: number) => (x: number) => number`. The drive value
  *      (0..1) shapes the curve's steepness AND its asymmetry. drive=0 always
  *      returns identity (clean passthrough). Curves are NORMALIZED so peak
- *      output ≈ unity regardless of drive — the saturator compresses dynamics
- *      but doesn't bump the overall peak level, so existing preset trim
- *      values (outputDb / level.volumeDb) stay roughly meaningful.
+ *      output ≈ unity regardless of drive.
  *
- *   2. TONE STACK — `lowFrequency` + `highFrequency` for the EQ3 between
- *      preDist and powerDist. Fender amps have wider/brighter tone stacks
+ *      **That normalisation is at the ENDPOINT, and only there.** `tanh(x·k) /
+ *      tanh(k)` pins output to 1 for an input of 1 and says nothing about
+ *      anything quieter: the slope at the origin is `k / tanh(k)`, which is
+ *      +22.8 dB on Modern High-Gain at `preDrive: 0.85`. A quiet signal is
+ *      AMPLIFIED here, hard, and a -12 dBFS input leaves that stage at 0.998.
+ *      Call `describeGainStructure` (`gain-structure.ts`) for the per-preset
+ *      table. Reshaping these curves so they are unity at low level is AF-02;
+ *      until then, treat "normalized" in this file as endpoint-only.
+ *
+ *   2. TONE STACK — `lowFrequency` + `highFrequency` for the EQ3 that sits
+ *      AFTER both saturators (not between them, as this comment claimed until
+ *      AF-01 — see `wireChain`). Fender amps have wider/brighter tone stacks
  *      (bass shelf around 80 Hz, treble around 4 kHz); Marshall narrower with
  *      a more mid-forward voice.
  *

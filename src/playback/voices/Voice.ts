@@ -1,11 +1,22 @@
 /**
  * Voice — a configurable `GuitarInstrument` built from a `VoicePreset`.
  *
- * Signal chain (top of file):
+ * Signal chain — the real order, verified against `wireChain` below:
  *
- *   synth ─► [bodyFilter] ─► [compressor] ─► [distortion] ─► [chorus] ─►
- *                            [delay] ─► [eq] ─► [autoWah] ─► [cabIR] ─►
- *                                                            volume ─► pan ─► output
+ *   synth ─► inputGain ─► [bodyFilter] ─► [compressor] ─► [distortion] ─►
+ *            [chorus] ─► [delay] ─► [autoWah] ─► [graphicEq…] ─► [ampPreGain]
+ *                │
+ *                ├─ [ampBassHpf] ─► [ampPreDist] ─► [ampPowerDist] ─┐
+ *                └─ [ampBassLpf] ────────────────────────────────────┤
+ *                                                    [ampBassMerge] ◄┘
+ *                       ─► [ampTone] ─► [ampPresence] ─► [ampOutput] ─►
+ *   [voiceReverb] ─► [cabIR] ─► [cabIRMakeup] ─► [finalEq] ─► volume ─► pan ─► output
+ *
+ * **The tone stack is AFTER both saturators, not between them.** Four comments
+ * in this repo said otherwise until AF-01; the wiring has always been the above.
+ * The amp's bass split is a parallel branch — lows bypass the saturators and
+ * rejoin at `ampBassMerge`, which is a plain `Tone.Gain(1)` and therefore does
+ * not compensate for summing two branches (AF-02's problem).
  *
  * Bracketed nodes are optional — they are constructed only when their config is
  * present on the preset. `volume` and `pan` are always present so every voice
@@ -138,6 +149,17 @@ interface ChainNodes {
    *  it hits MasterBus. Catches clipping introduced by the saturators / cab
    *  IR / makeup gain / Voice Level. */
   outputMeter?: Tone.Meter;
+  /** Tap on the ampPreGain output — what the saturators are actually being
+   *  fed, which neither of the other two taps can see.
+   *
+   *  They BRACKET this point: inputMeter sits ahead of preGainDb, the graphic
+   *  EQ trim and the whole pedalboard, and outputMeter sits behind the amp,
+   *  the cab and the final EQ. And because each curve is normalised at its
+   *  endpoint, a saturator hands back an ordinary-looking level however hard
+   *  it was hit — so the stage is invisible from both sides. This is the tap
+   *  that says whether the drive is being overloaded while the other two look
+   *  reasonable. */
+  driveMeter?: Tone.Meter;
 }
 
 type SynthNode = Tone.PluckSynth | Tone.FMSynth | Tone.Sampler;
@@ -498,6 +520,22 @@ export class Voice implements GuitarInstrument {
   getOutputLevelDb(): number {
     if (!this._chain.outputMeter) return -Infinity;
     const v = this._chain.outputMeter.getValue();
+    return typeof v === 'number' ? v : v[0] ?? -Infinity;
+  }
+
+  /** Current peak level (dBFS) at the amp's drive tap — after `preGainDb`,
+   *  the graphic EQ and the pedals, immediately before the bass split and the
+   *  saturators. Returns `-Infinity` when the chain isn't built or the preset
+   *  has no amp stage, which is the same reading as silence on purpose: there
+   *  is no drive stage to report on either way.
+   *
+   *  **Expect this to read HIGHER than both other taps on the gain presets**,
+   *  and expect the output tap not to move much when it does. That is the
+   *  endpoint normalisation being visible for the first time, not a fault in
+   *  the tap. */
+  getDriveLevelDb(): number {
+    if (!this._chain.driveMeter) return -Infinity;
+    const v = this._chain.driveMeter.getValue();
     return typeof v === 'number' ? v : v[0] ?? -Infinity;
   }
 
@@ -902,11 +940,18 @@ function buildChain(preset: VoicePreset): ChainNodes {
     nodes.ampBassLpf = new Tone.Filter({ type: 'lowpass', frequency: 120, Q: 0.7 });
     // Saturator waveshapers. The curve function comes from the model —
     // Twin uses symmetric quadratic, Plexi uses asymmetric linear, AC30
-    // uses arctan-compressed, etc. All curves are normalized so peaks ≈
-    // unity at any drive value (compresses dynamics without bumping
-    // headline level). 4× oversampling keeps aliasing harmonics out of
-    // the audible band on both stages. setMap rebuilds the LUT when
-    // drive or modelId changes (see applyAmp).
+    // uses arctan-compressed, etc.
+    //
+    // These curves are normalized AT THE ENDPOINT ONLY, which is not what this
+    // comment claimed until AF-01: "peaks ≈ unity … without bumping headline
+    // level" is true of a signal already at full scale and false of everything
+    // below it. The slope at the origin is `k / tanh(k)` — +22.8 dB on Metal's
+    // pre-stage, where a -12 dBFS input comes out at 0.998. These are gain
+    // stages. `describeGainStructure` in `gain-structure.ts` prints the table,
+    // and `driveMeter` below measures what they are actually fed. AF-02
+    // reshapes them; do not "fix" the level anywhere else in the meantime.
+    //
+    // setMap rebuilds the LUT when drive or modelId changes (see applyAmp).
     // 2× oversample on both stages. Was 4× during the amp redesign which
     // sounded cleaner against aliasing artifacts but pushed the audio thread
     // into underrun territory on lower-end machines (audible as constant
@@ -977,6 +1022,10 @@ function buildChain(preset: VoicePreset): ChainNodes {
   // built; consumers poll getValue() at their own cadence.
   nodes.inputMeter = new Tone.Meter();
   nodes.outputMeter = new Tone.Meter();
+  // Third tap, at the amp's drive stage. Built unconditionally like the other
+  // two; it is only CONNECTED when the preset builds an amp, so a voice with no
+  // amp reads -Infinity rather than a misleading zero.
+  nodes.driveMeter = new Tone.Meter();
   return nodes;
 }
 
@@ -988,8 +1037,14 @@ function buildChain(preset: VoicePreset): ChainNodes {
  *      → bodyFilter → compressor                       (pre-pedalboard shaping)
  *      → distortion → chorus → delay → autoWah         (pedalboard stage)
  *      → graphicEq bands → graphicEqLevel              (pre-amp tone shaper)
- *      → ampPreGain → ampPreDist → ampTone
- *        → ampPowerDist → ampPresence → ampOutput      (amp stage)
+ *      → ampPreGain                                    (amp input trim)
+ *        ├→ ampBassHpf → ampPreDist → ampPowerDist ─┐   (driven branch)
+ *        └→ ampBassLpf ─────────────────────────────┤   (clean lows, 120 Hz)
+ *                                     ampBassMerge ←┘
+ *        → ampTone → ampPresence → ampOutput           (amp stage)
+ *
+ *      The tone stack is AFTER both saturators. This diagram said "between"
+ *      until AF-01; the code below has always done the above.
  *      → voiceReverb                                   (spring/plate)
  *      → cabIR → cabIRMakeup                           (cab stage)
  *      → finalEq                                       (mastering EQ)
@@ -1054,6 +1109,11 @@ function wireChain(
   // tap outputMeter on the final per-voice node before MasterBus.
   if (c.inputGain && c.inputMeter) c.inputGain.connect(c.inputMeter);
   if (order.length > 0 && c.outputMeter) order[order.length - 1].connect(c.outputMeter);
+  // Drive tap — ampPreGain's output, which is the node the bass split and both
+  // saturators are fed from. Taken here rather than off ampPreDist because what
+  // this exists to show is what the shaper RECEIVES; the shaper's own output is
+  // normalised and says nothing.
+  if (c.ampPreGain && c.driveMeter) c.ampPreGain.connect(c.driveMeter);
   return order[order.length - 1];
 }
 
@@ -1086,6 +1146,7 @@ function disposeChain(c: ChainNodes): void {
   c.inputMeter?.dispose();
   c.volume?.dispose();
   c.outputMeter?.dispose();
+  c.driveMeter?.dispose();
   c.panner?.dispose();
 }
 

@@ -37,6 +37,7 @@ import { diffTracks } from './track-diff';
 import { totalDurationTicks } from '../composition-ops';
 import type { GuitarInstrument } from '../../playback/types';
 import { MasterBus } from '../../playback/voices/MasterBus';
+import { registerTrackLevelSource, type TrackLevels } from '../../playback/audio-debug';
 
 export interface BuildVoiceForTrack {
   (track: Track): GuitarInstrument & {
@@ -52,6 +53,13 @@ export interface BuildVoiceForTrack {
      * preset's level, which is what it did before the field existed.
      */
     updateInputGain?(inputGainDb: number | undefined): void;
+    /** The voice's three level taps, in dBFS. OPTIONAL for the same reason
+     *  `updateInputGain` is: a test double or a bare PluckSynth is a valid
+     *  instrument and has no meters. A missing getter reads as silence, which
+     *  is what a debug line should say about a tap that does not exist. */
+    getInputLevelDb?(): number;
+    getDriveLevelDb?(): number;
+    getOutputLevelDb?(): number;
   };
 }
 
@@ -147,6 +155,7 @@ export class MultiTrackPlayback {
       this._entries.push({ trackId: track.id, scheduler, voice, gain, panner });
     }
     this.applyTrackState();
+    registerTrackLevelSource(() => this.readTrackLevels());
   }
 
   /**
@@ -322,6 +331,37 @@ export class MultiTrackPlayback {
     }
     MasterBus.disconnectVoice(this._masterGain);
     this._masterGain.dispose();
+    registerTrackLevelSource(null);
+  }
+
+  /**
+   * The four taps per track, for `audio-debug`'s per-track line (AF-01).
+   *
+   * `faderDb` is the voice's own output tap plus this manager's gain node read
+   * in dB. Not a second measured tap and not a recomputation from track state:
+   * the stage between the two points is exactly one linear gain, so its value
+   * in dB is exactly what it does to the level — and reading the NODE rather
+   * than the `Track` means mute, solo and a mid-ramp fader are all reported as
+   * they actually are.
+   */
+  private readTrackLevels(): readonly TrackLevels[] {
+    const levels: TrackLevels[] = [];
+    for (const entry of this._entries) {
+      const track = this._composition.tracks?.find((t) => t.id === entry.trackId);
+      const outDb = entry.voice.getOutputLevelDb?.() ?? -Infinity;
+      const faderGain = entry.gain.gain.value;
+      const faderDb =
+        Number.isFinite(outDb) && faderGain > 0 ? outDb + 20 * Math.log10(faderGain) : -Infinity;
+      levels.push({
+        trackId: entry.trackId,
+        name: track?.name ?? entry.trackId,
+        inDb: entry.voice.getInputLevelDb?.() ?? -Infinity,
+        driveDb: entry.voice.getDriveLevelDb?.() ?? -Infinity,
+        outDb,
+        faderDb,
+      });
+    }
+    return levels;
   }
 }
 

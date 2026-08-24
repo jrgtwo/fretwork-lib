@@ -6,6 +6,14 @@ export { useVoiceStore, VOICE_STORAGE_KEY } from './useVoiceStore';
 export { resolveActiveVoice } from './resolve-active-voice';
 export { buildEffectiveVoice } from './buildEffectiveVoice';
 export { Voice } from './Voice';
+export { describeGainStructure, GAIN_STRUCTURE_PROBE_INPUTS } from './gain-structure';
+export type {
+  GainStructure,
+  GainStructureStage,
+  GainStructureOptions,
+  ShaperResponse,
+  SmallSignalGainDb,
+} from './gain-structure';
 export { MasterBus } from './MasterBus';
 export {
   SAMPLE_PACKS,

@@ -13,6 +13,25 @@
  *     [audio] voices=24 peak=31 notes/sec=22 drift=0.0ms
  *     [audio] voices=29 peak=31 notes/sec=24 drift=3.2ms ⚠ underrun
  *
+ * and, while a composition engine is alive, one line per track (AF-01):
+ *
+ *     [audio]   Rhythm      in=-14.2  drive=-5.1  out=-9.8  fader=-15.8 dB
+ *     [audio]   Lead        in=-11.0  drive=+2.4  out=-8.9  fader=-8.9 dB  ⚠ drive
+ *
+ * `in`    = the voice's input tap, after `Track.inputGainDb`, before anything
+ *           else — the instrument arriving
+ * `drive` = what the amp's saturators are being FED, after preGainDb, the
+ *           graphic EQ and the pedals. Expect this to be the hottest of the
+ *           four on a gain preset, and expect `out` not to follow it: the
+ *           curves are normalised at their endpoint, so a saturator hands back
+ *           an ordinary level however hard it was hit. That is the whole reason
+ *           this tap exists.
+ * `out`   = the voice's last node, pre-fader
+ * `fader` = the same signal after the track's gain, mute and solo — what
+ *           actually reaches the master
+ *
+ * Every figure is the PEAK over the last second, not an instant.
+ *
  * `voices` = active note count (incremented per Voice.play, decremented
  *            after an estimated lifetime expires)
  * `peak`   = highest active count seen since last reset
@@ -38,11 +57,48 @@ let activeCount = 0;
 let peakCount = 0;
 let notesThisSecond = 0;
 let peakOutputDbThisSecond = -Infinity;
+/** Per-track peaks for the last second, keyed by track id. */
+const peakTrackDbThisSecond = new Map<string, TrackLevels>();
 let peakMeterInterval: ReturnType<typeof setInterval> | null = null;
 let loggerInterval: ReturnType<typeof setInterval> | null = null;
 
 // Drift baseline — captured on first measurement after enable.
 let driftBaseline: { contextTime: number; performanceTime: number } | null = null;
+
+/** One track's four taps, in dB. */
+export interface TrackLevels {
+  readonly trackId: string;
+  readonly name: string;
+  /** Voice input tap — the instrument arriving. */
+  readonly inDb: number;
+  /** Amp drive tap — what the saturators are fed. `-Infinity` when the
+   *  preset has no amp stage. */
+  readonly driveDb: number;
+  /** Voice output tap, pre-fader. */
+  readonly outDb: number;
+  /** Post-fader: the voice output plus the track's gain, mute and solo. */
+  readonly faderDb: number;
+}
+
+/** Supplies the per-track line. Returns an empty list when no composition
+ *  engine is running. */
+export type TrackLevelSource = () => readonly TrackLevels[];
+
+let trackLevelSource: TrackLevelSource | null = null;
+
+/**
+ * Register (or clear, with `null`) the source of the per-track debug line.
+ *
+ * `MasterBus` is a singleton this module can simply import; a composition
+ * engine is not — it is constructed and disposed as the user opens and closes
+ * a composition, and it owns the voices. So it hands itself in rather than
+ * being reached for, and hands in `null` on dispose so a torn-down engine's
+ * voices are never polled.
+ */
+export function registerTrackLevelSource(source: TrackLevelSource | null): void {
+  trackLevelSource = source;
+  if (source === null) peakTrackDbThisSecond.clear();
+}
 
 function isEnabled(): boolean {
   if (typeof window === 'undefined') return false;
@@ -85,6 +141,7 @@ function tickLogger(): void {
   if (!isEnabled()) {
     notesThisSecond = 0;
     peakOutputDbThisSecond = -Infinity;
+    peakTrackDbThisSecond.clear();
     return;
   }
   const drift = measureDriftMs();
@@ -97,6 +154,7 @@ function tickLogger(): void {
     `[audio] voices=${activeCount} peak=${peakCount} notes/sec=${notesThisSecond} ` +
       `outPeak=${peakDbStr}dB drift=${drift.toFixed(1)}ms${driftWarn}${clipWarn}`,
   );
+  logTrackLines();
   notesThisSecond = 0;
   peakOutputDbThisSecond = -Infinity;
 }
@@ -111,7 +169,59 @@ function startPeakSampling(): void {
     if (!isEnabled()) return;
     const db = MasterBus.getOutputPeakDb();
     if (db > peakOutputDbThisSecond) peakOutputDbThisSecond = db;
+    sampleTrackPeaks();
   }, 50);
+}
+
+function sampleTrackPeaks(): void {
+  if (!trackLevelSource) return;
+  let levels: readonly TrackLevels[];
+  try {
+    levels = trackLevelSource();
+  } catch {
+    // A half-disposed engine. A debug line must never be the thing that takes
+    // playback down.
+    return;
+  }
+  for (const level of levels) {
+    const held = peakTrackDbThisSecond.get(level.trackId);
+    peakTrackDbThisSecond.set(
+      level.trackId,
+      held === undefined
+        ? level
+        : {
+            trackId: level.trackId,
+            name: level.name,
+            inDb: Math.max(held.inDb, level.inDb),
+            driveDb: Math.max(held.driveDb, level.driveDb),
+            outDb: Math.max(held.outDb, level.outDb),
+            faderDb: Math.max(held.faderDb, level.faderDb),
+          },
+    );
+  }
+}
+
+function formatDb(db: number): string {
+  if (!Number.isFinite(db)) return '  -inf';
+  return (db >= 0 ? '+' : '') + db.toFixed(1);
+}
+
+function logTrackLines(): void {
+  for (const level of peakTrackDbThisSecond.values()) {
+    // The drive tap is the one worth flagging. 0 dBFS at the shaper's input is
+    // the WaveShaper's ±1 domain edge — past it the curve stops being a curve
+    // and becomes a hard chop, which is what the artifacting report describes.
+    const driveWarn = level.driveDb > 0 ? '  ⚠ drive' : '';
+    // eslint-disable-next-line no-console
+    console.log(
+      `[audio]   ${level.name.slice(0, 12).padEnd(12)}` +
+        `in=${formatDb(level.inDb).padStart(6)}  ` +
+        `drive=${formatDb(level.driveDb).padStart(6)}  ` +
+        `out=${formatDb(level.outDb).padStart(6)}  ` +
+        `fader=${formatDb(level.faderDb).padStart(6)} dB${driveWarn}`,
+    );
+  }
+  peakTrackDbThisSecond.clear();
 }
 
 /** Reset peak polyphony tracking to the current count. Call between test
