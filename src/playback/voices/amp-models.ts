@@ -79,15 +79,21 @@ export interface AmpModel {
 
 // ─── Curve helpers — building blocks for the model curves below ───────────
 
-/** Symmetric tanh soft-clip, normalized so peak ≈ unity at any drive.
+/** Symmetric tanh soft-clip, normalized to UNITY SLOPE AT THE ORIGIN.
  *  Adds **odd** harmonics only — characteristic of push-pull power amps
  *  (matched tube pairs cancel even harmonics). Used by Twin (6L6 push-pull)
- *  and Modern High-Gain (matched pair cascading stages). */
+ *  and Modern High-Gain (matched pair cascading stages).
+ *
+ *  Dividing by `k` rather than by `tanh(k)` is the whole of AF-02. `tanh(k·x)`
+ *  has slope `k` at zero, so the old endpoint normalisation left the stage with
+ *  `k / tanh(k)` of gain on everything quiet — +22.8 dB at `k = 13.75` — while
+ *  its comment claimed the opposite. Dividing by the slope makes the curve unity
+ *  when quiet and saturating toward `1/k` when loud, which is what a saturator
+ *  is: a downward compressor. */
 function symmetricSoftClip(driveAmount: number, shape: number = 1): (x: number) => number {
   if (driveAmount < 0.001) return (x) => x;
   const k = 1 + driveAmount * shape;
-  const norm = Math.tanh(k);
-  return (x) => Math.tanh(x * k) / norm;
+  return (x) => Math.tanh(x * k) / k;
 }
 
 /** Asymmetric tanh soft-clip with different positive/negative gain.
@@ -102,9 +108,14 @@ function asymmetricSoftClip(
   if (driveAmount < 0.001) return (x) => x;
   const dp = 1 + driveAmount * positiveShape;
   const dn = 1 + driveAmount * negativeShape;
-  const normP = Math.tanh(dp);
-  const normN = Math.tanh(dn);
-  return (x) => (x >= 0 ? Math.tanh(x * dp) / normP : Math.tanh(x * dn) / normN);
+  // Each lobe by its OWN slope, so both halves are unity at the origin. The old
+  // per-lobe endpoint normalisation gave the two halves different small-signal
+  // gain — +14.0 dB up against +9.6 dB down on the Plexi at `preDrive: 0.4` —
+  // which is a standing DC offset at every level, including a whisper. The
+  // even-harmonic character is supposed to come from the two lobes bending
+  // differently under drive, and it still does; it just no longer happens to a
+  // signal that is nowhere near them.
+  return (x) => (x >= 0 ? Math.tanh(x * dp) / dp : Math.tanh(x * dn) / dn);
 }
 
 /** Arctan-based soft compression. Gentler shoulders than tanh — feels like
@@ -112,8 +123,9 @@ function asymmetricSoftClip(
 function arctanCompress(driveAmount: number, shape: number): (x: number) => number {
   if (driveAmount < 0.001) return (x) => x;
   const k = 1 + driveAmount * shape;
-  const norm = Math.atan(k);
-  return (x) => Math.atan(x * k) / norm;
+  // `atan(k·x)` also has slope `k` at zero, so the same division applies — not
+  // `atan(k)`, which is the endpoint.
+  return (x) => Math.atan(x * k) / k;
 }
 
 // ─── Model definitions ────────────────────────────────────────────────────
