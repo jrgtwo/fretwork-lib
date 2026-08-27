@@ -143,6 +143,7 @@ describe('describeGainStructure — the linear stages', () => {
   it('reads every gain node straight off the preset, in chain order', () => {
     const structure = describeGainStructure(METAL_PRESET);
     expect(structure.stages.map((s) => s.id)).toEqual([
+      'sourceTrim',
       'inputGain',
       'graphicEqLevel',
       'ampPreGain',
@@ -183,8 +184,8 @@ describe('describeGainStructure — the linear stages', () => {
     for (const id of ['ampPreGain', 'ampPreDist', 'ampPowerDist', 'ampBassMerge', 'ampOutput']) {
       expect(stage(structure, id).enabled).toBe(false);
     }
-    // Only inputGain (0) + volume (-4) remain; the cab makeup is undefined → 0.
-    expect(structure.smallSignalTotalDb).toBeCloseTo(-4, 6);
+    // sourceTrim (-17) + inputGain (0) + volume (-4); cab makeup undefined → 0.
+    expect(structure.smallSignalTotalDb).toBeCloseTo(-21, 6);
   });
 
   it('the bass merge sums two branches into a unity gain', () => {
@@ -200,18 +201,20 @@ describe('describeGainStructure — the linear stages', () => {
 describe('describeGainStructure — the total', () => {
   it('sums every enabled stage, so a quiet note has one number', () => {
     const structure = describeGainStructure(METAL_PRESET);
-    // 0 (input) + 9 (preGain) + 0 (preDist) + 0 (powerDist)
+    // -17 (source trim) + 0 (input) + 9 (preGain) + 0 (preDist) + 0 (powerDist)
     // + 0 (merge) + -2 (output) + 0 (cab makeup) + -4 (volume)
     //
-    // Was +40.58 before AF-02, and the 37.6 dB that went missing is the two
-    // shapers no longer being gain stages. What is left is the sum of the knobs
-    // a person can actually see, which is the point of the exercise.
-    expect(structure.smallSignalTotalDb).toBeCloseTo(3, 6);
+    // Was +40.58 before AF-02, +3 after it, -14 once AF-03's source calibration
+    // landed. The 37.6 dB that went missing in AF-02 is the two shapers no
+    // longer being gain stages; the 17 after it is a note stopping arriving at
+    // full scale. What is left is the sum of knobs a person can actually see.
+    expect(structure.smallSignalTotalDb).toBeCloseTo(-14, 6);
   });
 
   it('a clean preset is nowhere near it', () => {
-    // Clean: -12 preGain + 0 + 0 + 0 output + 3 cab makeup + 6 volume. Was +4.06.
-    expect(describeGainStructure(CLEAN_AMP_PRESET).smallSignalTotalDb).toBeCloseTo(-3, 6);
+    // Clean: -17 source trim + -12 preGain + 0 + 0 + 0 output + 3 cab makeup
+    // + 6 volume. Was +4.06 before AF-02, -3 after it.
+    expect(describeGainStructure(CLEAN_AMP_PRESET).smallSignalTotalDb).toBeCloseTo(-20, 6);
   });
 
   it('no stage carries gain the structure does not explain', () => {

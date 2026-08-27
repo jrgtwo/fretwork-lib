@@ -38,6 +38,7 @@
  * Bringing them in is `AF-04`'s job, and it has to measure them to do it.
  */
 import { getAmpModel } from './amp-models';
+import { isSourceCalibrated, sourceTrimDb } from './levels';
 import type { VoicePreset } from './types';
 
 /** Input magnitudes each shaper is probed at, in linear amplitude.
@@ -165,6 +166,14 @@ export function describeGainStructure(
   const model = ampOn ? getAmpModel(amp!.modelId) : null;
 
   const stages: GainStructureStage[] = [
+    gainStage(
+      'sourceTrim',
+      isSourceCalibrated(preset.source)
+        ? 'Source calibration'
+        : 'Source calibration (source unmeasured)',
+      true,
+      sourceTrimDb(preset.source),
+    ),
     gainStage(
       'inputGain',
       'Input gain',

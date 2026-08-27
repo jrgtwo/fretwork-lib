@@ -60,6 +60,13 @@ export {
 } from './voices/gain-structure';
 export { registerTrackLevelSource, type TrackLevels, type TrackLevelSource } from './audio-debug';
 export {
+  REFERENCE_LEVEL_DBFS,
+  SAMPLE_PACK_PEAK_DBFS,
+  sourceTrimDb,
+  trimForPeakDb,
+  isSourceCalibrated,
+} from './voices/levels';
+export {
   Voice,
   MasterBus,
   VOICE_PRESETS,

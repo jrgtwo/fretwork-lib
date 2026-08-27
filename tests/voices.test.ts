@@ -32,10 +32,16 @@ const hoisted = vi.hoisted(() => {
     samplerDispose: 0,
     chorusStart: 0,
   };
+  /** Every value a `Tone.Gain` was constructed with, in build order. Counting
+   *  constructors is not enough for AF-03's source trim: the trim's whole
+   *  content IS its value, and a node built at unity looks identical to one
+   *  built correctly if you only count them. */
+  const gainValues: number[] = [];
   function reset() {
     for (const k of Object.keys(calls) as (keyof typeof calls)[]) calls[k] = 0;
+    gainValues.length = 0;
   }
-  return { calls, reset };
+  return { calls, reset, gainValues };
 });
 
 vi.mock('tone', () => {
@@ -158,6 +164,7 @@ vi.mock('tone', () => {
     constructor(value: number = 1) {
       super();
       hoisted.calls.gainCtor++;
+      hoisted.gainValues.push(value);
       this.gain.value = value;
     }
   }
@@ -330,6 +337,7 @@ import {
   ACOUSTIC_BASS_PRESET,
   ACOUSTIC_UKULELE_PRESET,
 } from '../src/playback/voices/presets';
+import { REFERENCE_LEVEL_DBFS, SAMPLE_PACK_PEAK_DBFS } from '../src/playback/voices/levels';
 
 beforeEach(() => {
   hoisted.reset();
@@ -576,5 +584,68 @@ describe('Voice.swapPreset — source changes rebuild rather than strand the voi
 
     expect(hoisted.calls.pluckCtor).toBe(buildsAfterFirst);
     v.dispose();
+  });
+});
+
+
+describe('Voice — source calibration (AF-03)', () => {
+  /** -17 dB: the packs are mastered to -1 dBFS true peak and the reference is
+   *  -18 dBFS. Derived here the same way `levels.ts` derives it, so a change to
+   *  either constant moves the expectation with the code. */
+  const SAMPLER_TRIM = Math.pow(10, (REFERENCE_LEVEL_DBFS - SAMPLE_PACK_PEAK_DBFS) / 20);
+
+  function builtGain(value: number): boolean {
+    return hoisted.gainValues.some((v) => Math.abs(v - value) < 1e-9);
+  }
+
+  it('trims a sampled source to the reference level', () => {
+    // The defect in one line: without this, one note off a -1 dBFS sample lands
+    // at the amp at nearly full scale and a six-note chord is 14 dB past it.
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    expect(builtGain(SAMPLER_TRIM)).toBe(true);
+  });
+
+  it('leaves a synth source at unity, because nothing has measured its peak', () => {
+    // `ELECTRIC_GUITAR_PRESET` is a PluckSynth. What a synth peaks at is a
+    // property of its params, not of its source kind, so trimming it by the
+    // sample packs' mastering level would be inventing a fact.
+    const v = new Voice(ELECTRIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    expect(builtGain(SAMPLER_TRIM)).toBe(false);
+  });
+
+  it('calibrates a layer by ITS OWN source, not the primary\'s', () => {
+    // The reason the trim is its own node instead of sitting on the mixer: the
+    // layer feeds the mixer too. A synth layer under a sampled primary that
+    // inherited the packs' -17 dB would be silently 17 dB under its mix level,
+    // and `gainDb` — a relative mix control — would stop meaning what it says.
+    const layered = {
+      ...ACOUSTIC_GUITAR_PRESET,
+      id: 'layered-test',
+      layer: {
+        source: ELECTRIC_GUITAR_PRESET.source,
+        gainDb: -6,
+        octaveOffset: -1,
+        detuneCents: 0,
+      },
+    };
+    const v = new Voice(layered);
+    v.play('A3', '4n', 0);
+
+    expect(builtGain(Math.pow(10, -6 / 20))).toBe(true);
+    expect(builtGain(Math.pow(10, (-6 + REFERENCE_LEVEL_DBFS - SAMPLE_PACK_PEAK_DBFS) / 20))).toBe(false);
+  });
+
+  it('disposes the trim node with the rest of the chain', () => {
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    const before = hoisted.calls.gainCtor;
+    v.dispose();
+    v.play('A3', '4n', 0);
+    // A rebuild constructs the same set again — if the trim had leaked instead
+    // of being disposed, this count would not include it a second time.
+    expect(hoisted.calls.gainCtor).toBeGreaterThan(before);
+    expect(builtGain(SAMPLER_TRIM)).toBe(true);
   });
 });

@@ -67,6 +67,7 @@ function isStageEnabled<T extends { enabled?: boolean } | undefined>(
   return params != null && params.enabled !== false;
 }
 import { noteTriggered } from '../audio-debug';
+import { sourceTrimDb } from './levels';
 import type { GuitarInstrument } from '../types';
 
 export const DEFAULT_VOICE_LEVEL: VoiceLevel = { volumeDb: 0, pan: 0 };
@@ -186,6 +187,11 @@ export class Voice implements GuitarInstrument {
   private _lastBankByPitch: Map<string, number> = new Map();
   /** Always-present mixer node so layer + primary feed the same chain entry. */
   private _mixer: Tone.Gain | null = null;
+  /** Source calibration trim (AF-03) — brings the primary source down to the
+   *  reference level before anything else sees it. Its own node, not folded into
+   *  `_mixer`, because the layer feeds the mixer too and calibrates separately.
+   *  See `levels.ts`. */
+  private _sourceTrim: Tone.Gain | null = null;
   /** Always-present vibrato node. Depth=0 when idle; `play()` schedules
    *  depth ramps for per-note vibrato. */
   private _vibrato: Tone.Vibrato | null = null;
@@ -280,7 +286,15 @@ export class Voice implements GuitarInstrument {
       }));
       this._synth = this._samplerBanks[0];
       this._mixer = new Tone.Gain(1);
-      for (const bank of this._samplerBanks) bank.connect(this._mixer);
+      // Source calibration (AF-03) — see `levels.ts`. The trim goes on a node of
+      // its own between the source and the mixer rather than on the mixer,
+      // because the LAYER also feeds the mixer and may be a different source
+      // kind: a synth layer under a sampled primary must not inherit the sample
+      // packs' mastering trim. The layer carries its own, folded into
+      // `_layerGain` in `_buildLayer`.
+      this._sourceTrim = new Tone.Gain(dbToGain(sourceTrimDb(src)));
+      for (const bank of this._samplerBanks) bank.connect(this._sourceTrim);
+      this._sourceTrim.connect(this._mixer);
     } else {
       // Single-synth path: pluck-synth, fm-synth, or sampler with all-empty
       // banks (falls back to a neutral PluckSynth inside `buildSynth`).
@@ -288,7 +302,9 @@ export class Voice implements GuitarInstrument {
       this._samplerBanks = null;
       this._samplerBankUrls = null;
       this._mixer = new Tone.Gain(1);
-      this._synth.connect(this._mixer);
+      this._sourceTrim = new Tone.Gain(dbToGain(sourceTrimDb(src)));
+      this._synth.connect(this._sourceTrim);
+      this._sourceTrim.connect(this._mixer);
     }
     if (this._preset.layer) {
       this._buildLayer(this._preset.layer);
@@ -320,7 +336,11 @@ export class Voice implements GuitarInstrument {
     if (!this._mixer) return;
     this._layerSynth = buildSynth(layer.source);
     applyLayerDetune(this._layerSynth, layer.detuneCents);
-    this._layerGain = new Tone.Gain(dbToGain(layer.gainDb));
+    // The layer's own source calibration, folded in rather than given a node —
+    // `gainDb` is a MIX level relative to the primary and the trim is a fact
+    // about the layer's own source, so they add. Two gains at one point would be
+    // two things to get wrong for one job.
+    this._layerGain = new Tone.Gain(dbToGain(layer.gainDb + sourceTrimDb(layer.source)));
     this._layerSynth.connect(this._layerGain);
     this._layerGain.connect(this._mixer);
   }
@@ -458,12 +478,14 @@ export class Voice implements GuitarInstrument {
     this._samplerBankUrls = null;
     this._lastBankByPitch.clear();
     this._disposeLayer();
+    this._sourceTrim?.dispose();
     this._mixer?.dispose();
     this._vibrato?.dispose();
     this._pitchShift?.dispose();
     this._palmMuteFilter?.dispose();
     disposeChain(this._chain);
     this._synth = null;
+    this._sourceTrim = null;
     this._mixer = null;
     this._vibrato = null;
     this._pitchShift = null;

@@ -439,6 +439,11 @@ export {
   DEFAULT_AMP_MODEL_ID,
   describeGainStructure,
   GAIN_STRUCTURE_PROBE_INPUTS,
+  REFERENCE_LEVEL_DBFS,
+  SAMPLE_PACK_PEAK_DBFS,
+  sourceTrimDb,
+  trimForPeakDb,
+  isSourceCalibrated,
 } from './playback';
 export type {
   GainStructure,
