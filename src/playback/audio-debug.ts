@@ -30,7 +30,11 @@
  * `fader` = the same signal after the track's gain, mute and solo — what
  *           actually reaches the master
  *
- * Every figure is the PEAK over the last second, not an instant.
+ * Every figure is the SAMPLE PEAK over the last second, not an instant and not
+ * an average. These were RMS until the peak-meter fix, which is why the levels
+ * printed here looked comfortable while the audio clipped audibly — and why
+ * `outPeak` on the master line was, for a while, a name for a number that was
+ * not a peak. See `voices/peak-meter.ts`.
  *
  * `voices` = active note count (incremented per Voice.play, decremented
  *            after an estimated lifetime expires)
@@ -57,6 +61,7 @@ let activeCount = 0;
 let peakCount = 0;
 let notesThisSecond = 0;
 let peakOutputDbThisSecond = -Infinity;
+let peakPreLimiterDbThisSecond = -Infinity;
 /** Per-track peaks for the last second, keyed by track id. */
 const peakTrackDbThisSecond = new Map<string, TrackLevels>();
 let peakMeterInterval: ReturnType<typeof setInterval> | null = null;
@@ -141,6 +146,7 @@ function tickLogger(): void {
   if (!isEnabled()) {
     notesThisSecond = 0;
     peakOutputDbThisSecond = -Infinity;
+    peakPreLimiterDbThisSecond = -Infinity;
     peakTrackDbThisSecond.clear();
     return;
   }
@@ -148,15 +154,22 @@ function tickLogger(): void {
   const driftWarn = drift > 5 ? ' ⚠ underrun' : '';
   const peakDb = peakOutputDbThisSecond;
   const peakDbStr = peakDb === -Infinity ? '-inf' : peakDb.toFixed(1);
-  const clipWarn = peakDb > 0 ? ' ⚠ CLIPPING' : '';
+  const preDb = peakPreLimiterDbThisSecond;
+  const preDbStr = preDb === -Infinity ? '-inf' : preDb.toFixed(1);
+  // `outPeak` is measured AFTER the limiter and the safety clip, so it is pinned
+  // near -0.5 by construction and warning on it catches almost nothing. `inPeak`
+  // is what the master is being asked to pass, and it is the number that moves
+  // when the bus is being overdriven.
+  const clipWarn = preDb > 0 ? ' ⚠ OVERDRIVING MASTER' : peakDb > 0 ? ' ⚠ CLIPPING' : '';
   // eslint-disable-next-line no-console
   console.log(
     `[audio] voices=${activeCount} peak=${peakCount} notes/sec=${notesThisSecond} ` +
-      `outPeak=${peakDbStr}dB drift=${drift.toFixed(1)}ms${driftWarn}${clipWarn}`,
+      `inPeak=${preDbStr}dB outPeak=${peakDbStr}dB drift=${drift.toFixed(1)}ms${driftWarn}${clipWarn}`,
   );
   logTrackLines();
   notesThisSecond = 0;
   peakOutputDbThisSecond = -Infinity;
+  peakPreLimiterDbThisSecond = -Infinity;
 }
 
 /** Sample the MasterBus output meter at high frequency so the per-second
@@ -169,6 +182,8 @@ function startPeakSampling(): void {
     if (!isEnabled()) return;
     const db = MasterBus.getOutputPeakDb();
     if (db > peakOutputDbThisSecond) peakOutputDbThisSecond = db;
+    const pre = MasterBus.getPreLimiterPeakDb();
+    if (pre > peakPreLimiterDbThisSecond) peakPreLimiterDbThisSecond = pre;
     sampleTrackPeaks();
   }, 50);
 }

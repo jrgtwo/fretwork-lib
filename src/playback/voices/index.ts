@@ -7,6 +7,7 @@ export { resolveActiveVoice } from './resolve-active-voice';
 export { buildEffectiveVoice } from './buildEffectiveVoice';
 export { Voice } from './Voice';
 export { describeGainStructure, GAIN_STRUCTURE_PROBE_INPUTS } from './gain-structure';
+export { peakDbFromSamples, createPeakMeter, readPeakDb, PEAK_METER_SIZE } from './peak-meter';
 export {
   REFERENCE_LEVEL_DBFS,
   SAMPLE_PACK_PEAK_DBFS,

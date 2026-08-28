@@ -98,6 +98,7 @@ vi.mock('tone', () => {
     Limiter: MockNode,
     WaveShaper: MockNode,
     Meter: MockNode,
+    Analyser: MockNode,
     Buffer: MockNode,
     // `Metronome.start` awaits this before the first click, so the sampler's first
     // BufferSource exists — see Metronome.ts:183.

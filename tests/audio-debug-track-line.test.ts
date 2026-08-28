@@ -18,11 +18,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 describe('audio-debug — the per-track line', () => {
   let logged: string[];
   let restoreFlag: () => void;
+  let masterOutDb = -12;
+  let masterPreDb = -12;
 
   beforeEach(async () => {
     vi.resetModules();
     vi.useFakeTimers();
     logged = [];
+    masterOutDb = -12;
+    masterPreDb = -12;
     vi.spyOn(console, 'log').mockImplementation((msg: unknown) => {
       logged.push(String(msg));
     });
@@ -42,7 +46,8 @@ describe('audio-debug — the per-track line', () => {
   async function loadDebug() {
     vi.doMock('../src/playback/voices/MasterBus', () => ({
       MasterBus: {
-        getOutputPeakDb: () => -12,
+        getOutputPeakDb: () => masterOutDb,
+        getPreLimiterPeakDb: () => masterPreDb,
         setReverbBypassed: () => {},
       },
     }));
@@ -174,5 +179,89 @@ describe('audio-debug — the per-track line', () => {
     expect(() => vi.advanceTimersByTime(1000)).not.toThrow();
     expect(trackLines()).toHaveLength(0);
     debug.registerTrackLevelSource(null);
+  });
+});
+
+
+describe('audio-debug — the master line', () => {
+  // The output tap sits AFTER the limiter and the safety clip, so it is pinned
+  // near the clip's -0.5 dBFS ceiling by construction and warning on it catches
+  // almost nothing. These hold the pre-limiter reading as the one that speaks.
+  let logged: string[];
+  let masterOutDb: number;
+  let masterPreDb: number;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    logged = [];
+    masterOutDb = -0.5;
+    masterPreDb = -12;
+    vi.spyOn(console, 'log').mockImplementation((msg: unknown) => {
+      logged.push(String(msg));
+    });
+    (globalThis as unknown as { __FRETWORK_AUDIO_DEBUG?: boolean }).__FRETWORK_AUDIO_DEBUG = true;
+  });
+
+  afterEach(() => {
+    (globalThis as unknown as { __FRETWORK_AUDIO_DEBUG?: boolean }).__FRETWORK_AUDIO_DEBUG = false;
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  async function load() {
+    vi.doMock('../src/playback/voices/MasterBus', () => ({
+      MasterBus: {
+        getOutputPeakDb: () => masterOutDb,
+        getPreLimiterPeakDb: () => masterPreDb,
+        setReverbBypassed: () => {},
+      },
+    }));
+    return await import('../src/playback/audio-debug');
+  }
+
+  function masterLine(): string {
+    return logged.find((l) => l.startsWith('[audio] voices=')) ?? '';
+  }
+
+  it('prints both the level asked for and the level delivered', async () => {
+    await load();
+    vi.advanceTimersByTime(1000);
+    expect(masterLine()).toContain('inPeak=-12.0dB');
+    expect(masterLine()).toContain('outPeak=-0.5dB');
+  });
+
+  it('warns on the PRE-limiter level, which is the one that can exceed 0', async () => {
+    // The exact reported symptom: audible distortion, tidy output meter. The
+    // limiter is removing 8 dB and the output reading cannot show it.
+    masterPreDb = 8;
+    masterOutDb = -0.5;
+    await load();
+    vi.advanceTimersByTime(1000);
+    expect(masterLine()).toContain('⚠ OVERDRIVING MASTER');
+  });
+
+  it('starts each second fresh, so a transient is not reported forever', async () => {
+    // Without the reset, one loud moment would keep printing ⚠ OVERDRIVING for
+    // the rest of the session — a warning that never clears is a warning nobody
+    // reads. Stops at 950 ms so the change lands cleanly in the second window;
+    // which of the two intervals fires first at 1000 is not worth depending on.
+    masterPreDb = 8;
+    await load();
+    vi.advanceTimersByTime(950);
+    masterPreDb = -20;
+    vi.advanceTimersByTime(50);
+    expect(masterLine()).toContain('inPeak=8.0dB');
+
+    logged.length = 0;
+    vi.advanceTimersByTime(1000);
+    expect(masterLine()).toContain('inPeak=-20.0dB');
+    expect(masterLine()).not.toContain('⚠ OVERDRIVING');
+  });
+
+  it('says nothing when the bus is not being overdriven', async () => {
+    await load();
+    vi.advanceTimersByTime(1000);
+    expect(masterLine()).not.toContain('⚠');
   });
 });

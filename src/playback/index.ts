@@ -49,6 +49,7 @@ export {
   type AmpModelCategory,
 } from './voices/amp-models';
 export { MASTER_GAIN_MIN_DB, MASTER_GAIN_MAX_DB } from './voices/MasterBus';
+export { peakDbFromSamples, PEAK_METER_SIZE } from './voices/peak-meter';
 export {
   describeGainStructure,
   GAIN_STRUCTURE_PROBE_INPUTS,

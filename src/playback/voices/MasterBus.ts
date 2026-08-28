@@ -19,6 +19,7 @@
  * module doesn't require an unlocked AudioContext (matters for SSR / jsdom tests).
  */
 import * as Tone from 'tone';
+import { createPeakMeter, readPeakDb } from './peak-meter';
 import { DEFAULT_REVERB_SETTINGS, type ReverbSettings } from './types';
 
 /** Master gain range. -80 dB = effectively silent (signal grounded for all
@@ -81,7 +82,11 @@ class MasterBusImpl {
   private _masterGain: Tone.Gain | null = null;
   private _limiter: Tone.Compressor | null = null;
   private _safetyClip: Tone.WaveShaper | null = null;
-  private _meter: Tone.Meter | null = null;
+  private _meter: Tone.Analyser | null = null;
+  /** Tap BEFORE the limiter and the safety clip — what the master is being
+   *  ASKED to pass, as opposed to what it managed to pass. See
+   *  `getPreLimiterPeakDb`. */
+  private _preLimiterMeter: Tone.Analyser | null = null;
   private _settings: ReverbSettings = DEFAULT_REVERB_SETTINGS;
   /** Persisted master gain (dB). Read from localStorage on first build and
    *  written back on every setter call. Default 0 dB (unity). */
@@ -162,8 +167,22 @@ class MasterBusImpl {
     // Diagnostic meter on the FINAL output — taps the safety clip so the
     // reading reflects what's actually leaving the bus (post-everything).
     // Used by audio-debug.ts and the lab clip indicator.
-    const meter = new Tone.Meter({ smoothing: 0 });
+    const meter = createPeakMeter();
     safetyClip.connect(meter);
+
+    // Second tap, BEFORE the limiter and the safety clip.
+    //
+    // The output meter above sits downstream of the two stages whose whole job
+    // is to stop the output going over — so BY CONSTRUCTION it can never read
+    // much above the safety clip's -0.5 dBFS ceiling, however hard the bus is
+    // being driven. A signal arriving here at +10 dBFS is squashed by the
+    // limiter, chopped by the clip, and reported as a tidy -0.5: audible
+    // distortion, clean meter. That is the reported symptom exactly, and fixing
+    // the RMS-vs-peak bug does not touch it.
+    //
+    // This tap is the one that answers "is the master being overdriven".
+    const preLimiterMeter = createPeakMeter();
+    masterGain.connect(preLimiterMeter);
 
     this._input = input;
     this._reverb = reverb;
@@ -172,6 +191,7 @@ class MasterBusImpl {
     this._limiter = limiter;
     this._safetyClip = safetyClip;
     this._meter = meter;
+    this._preLimiterMeter = preLimiterMeter;
     return { input, reverb };
   }
 
@@ -200,12 +220,33 @@ class MasterBusImpl {
     }
   }
 
-  /** Current peak output level in dBFS. > 0 = clipping. Returns -Infinity
-   *  when the bus hasn't been built yet. Used by audio-debug.ts. */
+  /** Current SAMPLE PEAK output level in dBFS. > 0 = clipping. Returns -Infinity
+   *  when the bus hasn't been built yet. Used by audio-debug.ts.
+   *
+   *  This was a `Tone.Meter` until the peak-meter fix, which means it reported
+   *  RMS while being named `getOutputPeakDb` and documented as "> 0 = clipping".
+   *  On musical material that reading essentially never crosses 0, so this
+   *  method quietly asserted "no clipping" whatever was happening. Every earlier
+   *  conclusion drawn from it should be re-checked.
+   *
+   *  Still SAMPLE peak, not true peak — an intersample over of up to ~3 dB can
+   *  pass this reading and clip at the converter. See `peak-meter.ts`. */
   getOutputPeakDb(): number {
-    if (!this._meter) return -Infinity;
-    const v = this._meter.getValue();
-    return typeof v === 'number' ? v : Array.isArray(v) ? Math.max(...v) : -Infinity;
+    return readPeakDb(this._meter);
+  }
+
+  /**
+   * Sample peak arriving at the limiter, in dBFS — what the master is being
+   * ASKED to pass.
+   *
+   * {@link getOutputPeakDb} taps after the limiter and the safety clip, so it
+   * reports what the bus managed to deliver and is pinned near -0.5 dBFS by
+   * construction. Anything over 0 here is signal the limiter is having to
+   * remove, which is audible as distortion long before the output reading moves
+   * at all. Returns -Infinity when the bus hasn't been built.
+   */
+  getPreLimiterPeakDb(): number {
+    return readPeakDb(this._preLimiterMeter);
   }
 
   /** Diagnostic: bypass the reverb at runtime. Useful for A/B testing whether
@@ -336,6 +377,12 @@ class MasterBusImpl {
     this._masterGain?.dispose();
     this._limiter?.dispose();
     this._safetyClip?.dispose();
+    // Was missing until the peak-meter fix: the meter outlived every dispose,
+    // holding an AnalyserNode per torn-down bus.
+    this._meter?.dispose();
+    this._meter = null;
+    this._preLimiterMeter?.dispose();
+    this._preLimiterMeter = null;
     this._input = null;
     this._reverb = null;
     this._busCompressor = null;

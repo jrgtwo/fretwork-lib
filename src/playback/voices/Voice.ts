@@ -68,6 +68,7 @@ function isStageEnabled<T extends { enabled?: boolean } | undefined>(
 }
 import { noteTriggered } from '../audio-debug';
 import { sourceTrimDb } from './levels';
+import { createPeakMeter, readPeakDb } from './peak-meter';
 import type { GuitarInstrument } from '../types';
 
 export const DEFAULT_VOICE_LEVEL: VoiceLevel = { volumeDb: 0, pan: 0 };
@@ -143,13 +144,13 @@ interface ChainNodes {
   inputGain?: Tone.Gain;
   /** Tap on the inputGain output — measures what's actually entering the
    *  amp/effects chain after the input-gain stage. */
-  inputMeter?: Tone.Meter;
+  inputMeter?: Tone.Analyser;
   volume?: Tone.Volume;
   panner?: Tone.Panner;
   /** Tap on the panner output — measures the per-voice signal right before
    *  it hits MasterBus. Catches clipping introduced by the saturators / cab
    *  IR / makeup gain / Voice Level. */
-  outputMeter?: Tone.Meter;
+  outputMeter?: Tone.Analyser;
   /** Tap on the ampPreGain output — what the saturators are actually being
    *  fed, which neither of the other two taps can see.
    *
@@ -160,7 +161,7 @@ interface ChainNodes {
    *  it was hit — so the stage is invisible from both sides. This is the tap
    *  that says whether the drive is being overloaded while the other two look
    *  reasonable. */
-  driveMeter?: Tone.Meter;
+  driveMeter?: Tone.Analyser;
 }
 
 type SynthNode = Tone.PluckSynth | Tone.FMSynth | Tone.Sampler;
@@ -532,17 +533,13 @@ export class Voice implements GuitarInstrument {
    *  knob, before bodyFilter / amp / etc. Returns `-Infinity` if the chain
    *  isn't built yet (no audio flowing). Designed for ~60 fps UI polling. */
   getInputLevelDb(): number {
-    if (!this._chain.inputMeter) return -Infinity;
-    const v = this._chain.inputMeter.getValue();
-    return typeof v === 'number' ? v : v[0] ?? -Infinity;
+    return readPeakDb(this._chain.inputMeter);
   }
 
   /** Current peak level (dBFS) at the output tap — the per-voice signal as it
    *  hits MasterBus. Returns `-Infinity` if the chain isn't built yet. */
   getOutputLevelDb(): number {
-    if (!this._chain.outputMeter) return -Infinity;
-    const v = this._chain.outputMeter.getValue();
-    return typeof v === 'number' ? v : v[0] ?? -Infinity;
+    return readPeakDb(this._chain.outputMeter);
   }
 
   /** Current peak level (dBFS) at the amp's drive tap — after `preGainDb`,
@@ -556,9 +553,7 @@ export class Voice implements GuitarInstrument {
    *  endpoint normalisation being visible for the first time, not a fault in
    *  the tap. */
   getDriveLevelDb(): number {
-    if (!this._chain.driveMeter) return -Infinity;
-    const v = this._chain.driveMeter.getValue();
-    return typeof v === 'number' ? v : v[0] ?? -Infinity;
+    return readPeakDb(this._chain.driveMeter);
   }
 
   /** Update / add / remove the sub-body layer. Source-kind changes (or
@@ -1039,15 +1034,16 @@ function buildChain(preset: VoicePreset): ChainNodes {
   // Always present: volume + pan at the end of the chain.
   nodes.volume = new Tone.Volume(preset.level.volumeDb);
   nodes.panner = new Tone.Panner(preset.level.pan);
-  // Input + output meters — parallel taps for clip detection in the lab UI.
-  // Tone.Meter uses an internal AnalyserNode and adds negligible CPU. Always
-  // built; consumers poll getValue() at their own cadence.
-  nodes.inputMeter = new Tone.Meter();
-  nodes.outputMeter = new Tone.Meter();
+  // Input + output taps. SAMPLE PEAK, not RMS — see `peak-meter.ts` for why
+  // that distinction cost a day of diagnosis, and for why it is sample peak
+  // rather than true peak. Always built; consumers poll at their own cadence
+  // and do their own peak-holding.
+  nodes.inputMeter = createPeakMeter();
+  nodes.outputMeter = createPeakMeter();
   // Third tap, at the amp's drive stage. Built unconditionally like the other
   // two; it is only CONNECTED when the preset builds an amp, so a voice with no
   // amp reads -Infinity rather than a misleading zero.
-  nodes.driveMeter = new Tone.Meter();
+  nodes.driveMeter = createPeakMeter();
   return nodes;
 }
 

@@ -320,6 +320,20 @@ vi.mock('tone', () => {
       constructor(_opts?: unknown) { super(); }
       getValue() { return -Infinity; }
     },
+    // Returns a real waveform buffer rather than a canned dB figure. The RMS-vs-
+    // peak bug survived a whole suite partly because the old Meter mock handed
+    // back a number and every test agreed with it; a mock that returns SAMPLES
+    // makes the getters run the arithmetic they ship with.
+    Analyser: class extends MockNode {
+      readonly size: number;
+      samples: Float32Array;
+      constructor(opts?: { size?: number }) {
+        super();
+        this.size = opts?.size ?? 1024;
+        this.samples = new Float32Array(this.size);
+      }
+      getValue() { return this.samples; }
+    },
     getContext: () => ({ currentTime: 0, lookAhead: 0.1 }),
     start: async () => undefined,
     loaded: async () => undefined,
@@ -647,5 +661,59 @@ describe('Voice — source calibration (AF-03)', () => {
     // of being disposed, this count would not include it a second time.
     expect(hoisted.calls.gainCtor).toBeGreaterThan(before);
     expect(builtGain(SAMPLER_TRIM)).toBe(true);
+  });
+});
+
+
+describe('Voice — the level taps report PEAK, not RMS', () => {
+  /** The regression test that did not exist. Every meter in this library was a
+   *  `Tone.Meter`, which returns RMS; on a plucked note that sits 12-20 dB below
+   *  the peak, so the app showed comfortable numbers while the audio clipped
+   *  audibly. Nothing caught it because the old mock returned a canned dB value
+   *  and every assertion agreed with the mock rather than with the arithmetic. */
+  function spikyBuffer(size: number, peak: number): Float32Array {
+    // Quiet almost everywhere, one large excursion — a pluck transient. RMS of
+    // this is tiny; the peak is what decides whether the next stage clamps.
+    const buffer = new Float32Array(size);
+    buffer.fill(0.01);
+    buffer[Math.floor(size / 2)] = peak;
+    return buffer;
+  }
+
+  function analyserFor(v: Voice, key: 'inputMeter' | 'driveMeter' | 'outputMeter') {
+    return (v as unknown as { _chain: Record<string, { samples: Float32Array; size: number }> })
+      ._chain[key];
+  }
+
+  it.each([
+    ['getInputLevelDb', 'inputMeter'],
+    ['getDriveLevelDb', 'driveMeter'],
+    ['getOutputLevelDb', 'outputMeter'],
+  ] as const)('%s returns the largest sample in the window', (getter, key) => {
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    const node = analyserFor(v, key);
+    node.samples = spikyBuffer(node.size, 0.9);
+
+    // RMS of this buffer is about 0.02 (-34 dB). The peak is 0.9 (-0.9 dB).
+    expect(v[getter]()).toBeCloseTo(20 * Math.log10(0.9), 6);
+  });
+
+  it('reports a level ABOVE full scale rather than pinning at 0 dB', () => {
+    // The single reading these exist to show. A meter that clamps at full scale
+    // hides exactly the condition being hunted.
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    const node = analyserFor(v, 'driveMeter');
+    node.samples = spikyBuffer(node.size, 1.8);
+
+    expect(v.getDriveLevelDb()).toBeCloseTo(20 * Math.log10(1.8), 6);
+    expect(v.getDriveLevelDb()).toBeGreaterThan(0);
+  });
+
+  it('reads silence as -Infinity', () => {
+    const v = new Voice(ACOUSTIC_GUITAR_PRESET);
+    v.play('A3', '4n', 0);
+    expect(v.getOutputLevelDb()).toBe(-Infinity);
   });
 });
