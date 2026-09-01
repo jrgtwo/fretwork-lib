@@ -9,6 +9,21 @@
  *
  * These values are deliberately rough — Phase 0 of the audio work dials in the
  * final numbers and we replace them here.
+ *
+ * ── Sampler `release`, retuned 2026-08-31 ────────────────────────────────────
+ *
+ * Every sampled preset here carried 1.5–2.8 s. Tone documents `Sampler.release`
+ * as `Min: 0 / Max: 1` (`classes/Sampler.html`), so all ten now sit at 1.0 — the
+ * longest tail the node's own documentation offers.
+ *
+ * This SHORTENS the tail on every sampled voice and is audible; it is not a
+ * cosmetic change. The old values pre-date anything checking them against the
+ * node, and the composer's voice editor now declares the documented range, so a
+ * preset above it drew its Release control pinned at the right end with the true
+ * value only in the readout.
+ *
+ * If 1.0 turns out to be too short by ear, the answer is a decision about what
+ * release should be — not a wider control. The range is the node's.
  */
 import type {
   FretInstrumentId,
@@ -49,7 +64,7 @@ export const ACOUSTIC_GUITAR_PRESET: VoicePreset = {
   source: {
     kind: 'sampler',
     samples: PHILHARMONIA_CLASSICAL,
-    release: 2.5,
+    release: 1.0,
   },
   level: { volumeDb: 3, pan: 0 },
 };
@@ -97,7 +112,7 @@ export const KARORYFER_GREEN_GUITAR_PRESET: VoicePreset = {
   source: {
     kind: 'sampler',
     samples: KARORYFER_GREEN,
-    release: 2.5,
+    release: 1.0,
   },
   level: { volumeDb: 0, pan: 0 },
   effects: KARORYFER_GREEN_CAB
@@ -113,7 +128,7 @@ export const KARORYFER_BLACK_GUITAR_PRESET: VoicePreset = {
   source: {
     kind: 'sampler',
     samples: KARORYFER_BLACK,
-    release: 2.5,
+    release: 1.0,
   },
   level: { volumeDb: -2, pan: 0 },
   effects: KARORYFER_BLACK_CAB
@@ -252,7 +267,7 @@ export const CLEAN_AMP_PRESET: VoicePreset = {
   name: 'Clean Amp',
   instrumentId: 'guitar',
   family: 'electric',
-  source: { kind: 'sampler', samples: OFFSET_P90, release: 2.5 },
+  source: { kind: 'sampler', samples: OFFSET_P90, release: 1.0 },
   // First-pass loudness balancing across the amp arc — Clean is the quiet end
   // of the drive spectrum, so it gets the biggest level boost. See the level
   // ladder at the top of this preset group.
@@ -278,7 +293,7 @@ export const BLUES_PRESET: VoicePreset = {
   name: 'Blues',
   instrumentId: 'guitar',
   family: 'electric',
-  source: { kind: 'sampler', samples: OFFSET_P90, release: 2.2 },
+  source: { kind: 'sampler', samples: OFFSET_P90, release: 1.0 },
   level: { volumeDb: -0.5, pan: 0 },
   effects: {
     amp: {
@@ -298,7 +313,7 @@ export const CRUNCH_PRESET: VoicePreset = {
   name: 'Crunch',
   instrumentId: 'guitar',
   family: 'electric',
-  source: { kind: 'sampler', samples: OFFSET_P90, release: 2.0 },
+  source: { kind: 'sampler', samples: OFFSET_P90, release: 1.0 },
   level: { volumeDb: 0, pan: 0 },
   effects: {
     amp: {
@@ -318,7 +333,7 @@ export const LEAD_PRESET: VoicePreset = {
   name: 'Lead',
   instrumentId: 'guitar',
   family: 'electric',
-  source: { kind: 'sampler', samples: OFFSET_P90, release: 2.5 },
+  source: { kind: 'sampler', samples: OFFSET_P90, release: 1.0 },
   level: { volumeDb: -2, pan: 0 },
   effects: {
     delay: { delayTime: 0.32, feedback: 0.25, wet: 0.12 },
@@ -339,7 +354,7 @@ export const METAL_PRESET: VoicePreset = {
   name: 'Metal',
   instrumentId: 'guitar',
   family: 'electric',
-  source: { kind: 'sampler', samples: OFFSET_P90, release: 1.5 },
+  source: { kind: 'sampler', samples: OFFSET_P90, release: 1.0 },
   level: { volumeDb: -4, pan: 0 },
   effects: {
     amp: {
@@ -360,7 +375,7 @@ export const SURF_PRESET: VoicePreset = {
   name: 'Surf',
   instrumentId: 'guitar',
   family: 'electric',
-  source: { kind: 'sampler', samples: OFFSET_P90, release: 2.5 },
+  source: { kind: 'sampler', samples: OFFSET_P90, release: 1.0 },
   level: { volumeDb: 6, pan: 0 },
   effects: {
     amp: {
@@ -381,7 +396,7 @@ export const AMBIENT_PRESET: VoicePreset = {
   name: 'Ambient',
   instrumentId: 'guitar',
   family: 'electric',
-  source: { kind: 'sampler', samples: OFFSET_P90, release: 2.8 },
+  source: { kind: 'sampler', samples: OFFSET_P90, release: 1.0 },
   level: { volumeDb: 4, pan: 0 },
   effects: {
     chorus: { frequency: 0.8, depth: 0.5, wet: 0.35, type: 'sine', feedback: 0.2, delayTime: 0.004, spread: 180 },
