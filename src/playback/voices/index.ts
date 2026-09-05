@@ -30,3 +30,16 @@ export {
   prefetchSampleBanks,
 } from './sample-packs';
 export type { SamplePack } from './sample-packs';
+
+// Experimental circuit-modelled amps. Additive: the five models in
+// `amp-models.ts` and everything using them are untouched.
+export {
+  CIRCUIT_AMPS,
+  getCircuitAmp,
+  DEFAULT_CIRCUIT_AMP_ID,
+} from './circuit-amp/registry';
+export type {
+  CircuitAmp,
+  CircuitAmpControl,
+  CircuitAmpCircuit,
+} from './circuit-amp/types';

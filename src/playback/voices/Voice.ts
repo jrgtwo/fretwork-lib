@@ -55,6 +55,12 @@ import type {
 } from './types';
 import { NotesBus } from './NotesBus';
 import { getAmpModel } from './amp-models';
+import { getCircuitAmp } from './circuit-amp/registry';
+import {
+  buildCircuitAmpLite,
+  disposeCircuitAmpLite,
+  type CircuitAmpLiteNodes,
+} from './circuit-amp/lite-renderer';
 
 /** A rack stage is "in the chain" iff its params object exists AND its
  *  optional `enabled` flag isn't explicitly `false`. Undefined `enabled`
@@ -122,6 +128,15 @@ interface ChainNodes {
   ampPresence?: Tone.Filter;
   /** Output trim after all amp stages. */
   ampOutput?: Tone.Gain;
+  /** The experimental circuit amp — a self-contained sub-graph with its own
+   *  entry and exit. Built INSTEAD of every `amp*` node above when
+   *  `effects.circuitAmp` is present and enabled: a signal chain has one amp,
+   *  and letting both run would be a bug that sounds like a feature.
+   *
+   *  Its nodes live inside rather than beside these, because a circuit's node
+   *  list is a property of the circuit and differs per amp — a Champ has no
+   *  phase splitter, a Deluxe has tremolo. See `circuit-amp/types.ts`. */
+  circuitAmp?: CircuitAmpLiteNodes;
   /** Per-voice spring/plate reverb. Sits between the amp and the cab in
    *  the chain, mimicking a guitar amp's built-in reverb tank. Separate
    *  from the global MasterBus reverb send. */
@@ -162,6 +177,19 @@ interface ChainNodes {
    *  that says whether the drive is being overloaded while the other two look
    *  reasonable. */
   driveMeter?: Tone.Analyser;
+  /** Tap on the circuit amp's OUTPUT.
+   *
+   *  None of the three taps above can see the amp alone: `inputMeter` sits
+   *  ahead of the whole pedalboard, `driveMeter` sits in front of the amp, and
+   *  `outputMeter` sits on the panner with the cab, the final EQ and the voice
+   *  volume already applied.
+   *
+   *  This is also how a circuit amp reports what it did to level.
+   *  `gain-structure.ts` is arithmetic over a preset and a circuit amp's gain
+   *  is a product of several stages that moves with playing strength once the
+   *  supply sags, so there is no number to derive. Measured instead: the
+   *  difference between `driveMeter` and this. */
+  circuitAmpMeter?: Tone.Analyser;
 }
 
 type SynthNode = Tone.PluckSynth | Tone.FMSynth | Tone.Sampler;
@@ -556,6 +584,19 @@ export class Voice implements GuitarInstrument {
     return readPeakDb(this._chain.driveMeter);
   }
 
+  /** Sample peak at the CIRCUIT amp's output, in dBFS. `-Infinity` when this
+   *  voice has no circuit amp, which reads the same as silence on purpose:
+   *  there is no amp to report on either way.
+   *
+   *  Subtract {@link getDriveLevelDb} from this and you have what the amp did
+   *  to the level. For a circuit amp that subtraction is the ONLY way to get
+   *  the figure — `describeGainStructure` reads gain nodes and probes shaper
+   *  curves, and a circuit's gain is a product of several stages that moves
+   *  with playing strength once the supply sags. Measured, not derived. */
+  getCircuitAmpLevelDb(): number {
+    return readPeakDb(this._chain.circuitAmpMeter);
+  }
+
   /** Update / add / remove the sub-body layer. Source-kind changes (or
    *  add/remove) rebuild the layer; everything else mutates in place. */
   updateLayer(next: VoiceLayer | undefined): void {
@@ -942,7 +983,18 @@ function buildChain(preset: VoicePreset): ChainNodes {
     nodes.graphicEqBands = buildGraphicEqBands(preset.effects.graphicEq);
     nodes.graphicEqLevel = new Tone.Gain(dbToGain(preset.effects.graphicEq.levelDb));
   }
-  if (isStageEnabled(preset.effects?.amp)) {
+  // One amp or the other. The circuit amp takes the amp's slot when it is
+  // present and enabled, and the classic stage is not built at all.
+  const circuitAmpParams = preset.effects?.circuitAmp;
+  const useCircuitAmp = isStageEnabled(circuitAmpParams);
+  if (useCircuitAmp && circuitAmpParams) {
+    nodes.circuitAmp = buildCircuitAmpLite(
+      circuitAmpParams,
+      getCircuitAmp(circuitAmpParams.ampId),
+    );
+    nodes.circuitAmpMeter = createPeakMeter();
+  }
+  if (!useCircuitAmp && isStageEnabled(preset.effects?.amp)) {
     const a = preset.effects!.amp!;
     // Look up the amp model — defines curve algorithm, tone-stack crossover
     // frequencies, and presence-shelf frequency. Falls back to a default if
@@ -1047,6 +1099,14 @@ function buildChain(preset: VoicePreset): ChainNodes {
   return nodes;
 }
 
+/** Build a preset's chain nodes without a Voice or an audio graph. Exported
+ *  for tests only: the chain's SHAPE rules — one amp or the other, which
+ *  meters exist — are worth holding and are otherwise reachable only through a
+ *  full `play()`. */
+export function buildChainNodesForTest(preset: VoicePreset): ChainNodes {
+  return buildChain(preset);
+}
+
 /** Connect entry node → chain in fixed order. Returns the chain's exit node.
  *  `entry` is the mixer (which receives the primary synth + optional layer).
  *
@@ -1085,6 +1145,23 @@ function wireChain(
     for (const band of c.graphicEqBands) order.push(band);
   }
   if (c.graphicEqLevel) order.push(c.graphicEqLevel);
+  // The circuit amp is a self-contained sub-graph with its own entry and exit,
+  // so it does not fit the linear `order` array — the same problem the bass
+  // split has below, solved the same way. Flush the prefix so the amp's entry
+  // is connected, then resume the linear chain from its exit.
+  //
+  // Do NOT push entry and exit as two consecutive members instead: the loop
+  // would add an `entry -> exit` connection on top of the one the renderer
+  // already made internally, and a duplicated Web Audio connection SUMS the
+  // signal with itself — a silent +6 dB.
+  if (c.circuitAmp) {
+    order.push(c.circuitAmp.entry);
+    for (let i = 0; i < order.length - 1; i++) {
+      order[i].connect(order[i + 1]);
+    }
+    order.length = 0;
+    order.push(c.circuitAmp.exit);
+  }
   if (c.ampPreGain) order.push(c.ampPreGain);
   // Amp stage uses a parallel bass-bypass topology that doesn't fit the
   // linear `order` chain. We flush the prefix up to ampPreGain, wire the
@@ -1132,6 +1209,11 @@ function wireChain(
   // this exists to show is what the shaper RECEIVES; the shaper's own output is
   // normalised and says nothing.
   if (c.ampPreGain && c.driveMeter) c.ampPreGain.connect(c.driveMeter);
+  // The same two taps for a circuit amp. `driveMeter` keeps its meaning —
+  // what the amp is being FED — which for a circuit amp is its input gain's
+  // output; `circuitAmpMeter` is what came back out.
+  if (c.circuitAmp && c.driveMeter) c.circuitAmp.inputGain.connect(c.driveMeter);
+  if (c.circuitAmp && c.circuitAmpMeter) c.circuitAmp.exit.connect(c.circuitAmpMeter);
   return order[order.length - 1];
 }
 
@@ -1165,6 +1247,8 @@ function disposeChain(c: ChainNodes): void {
   c.volume?.dispose();
   c.outputMeter?.dispose();
   c.driveMeter?.dispose();
+  if (c.circuitAmp) disposeCircuitAmpLite(c.circuitAmp);
+  c.circuitAmpMeter?.dispose();
   c.panner?.dispose();
 }
 

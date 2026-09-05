@@ -48,6 +48,18 @@ export {
   type AmpModel,
   type AmpModelCategory,
 } from './voices/amp-models';
+// Experimental circuit-modelled amps. Additive — the five models above and
+// everything using them are untouched.
+export {
+  CIRCUIT_AMPS,
+  getCircuitAmp,
+  DEFAULT_CIRCUIT_AMP_ID,
+} from './voices/circuit-amp/registry';
+export type {
+  CircuitAmp,
+  CircuitAmpControl,
+  CircuitAmpCircuit,
+} from './voices/circuit-amp/types';
 export { MASTER_GAIN_MIN_DB, MASTER_GAIN_MAX_DB } from './voices/MasterBus';
 export { peakDbFromSamples, PEAK_METER_SIZE } from './voices/peak-meter';
 export {
@@ -116,6 +128,7 @@ export type {
   AutoWahParams,
   CabIRParams,
   AmpParams,
+  CircuitAmpParams,
   VoiceReverbParams,
   GraphicEqParams,
   EffectsConfig,

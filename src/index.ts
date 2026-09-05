@@ -437,6 +437,9 @@ export {
   AMP_MODELS,
   getAmpModel,
   DEFAULT_AMP_MODEL_ID,
+  CIRCUIT_AMPS,
+  getCircuitAmp,
+  DEFAULT_CIRCUIT_AMP_ID,
   describeGainStructure,
   GAIN_STRUCTURE_PROBE_INPUTS,
   REFERENCE_LEVEL_DBFS,
@@ -453,7 +456,7 @@ export type {
   SmallSignalGainDb,
   TrackLevels,
 } from './playback';
-export type { AbsoluteCell, CagedShape, CagedShapeId, CagedLetter, SamplePack, CabinetIR, AmpModel, AmpModelCategory } from './playback';
+export type { AbsoluteCell, CagedShape, CagedShapeId, CagedLetter, SamplePack, CabinetIR, AmpModel, AmpModelCategory, CircuitAmp, CircuitAmpControl, CircuitAmpCircuit } from './playback';
 export type {
   PlaybackPattern,
   PlaybackOptions,
@@ -482,6 +485,7 @@ export type {
   AutoWahParams,
   CabIRParams,
   AmpParams,
+  CircuitAmpParams,
   VoiceReverbParams,
   GraphicEqParams,
   EffectsConfig,

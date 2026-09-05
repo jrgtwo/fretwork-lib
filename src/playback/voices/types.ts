@@ -288,6 +288,40 @@ export interface AmpParams {
   readonly outputDb: number;
 }
 
+/**
+ * An experimental circuit-modelled amp.
+ *
+ * Sits BESIDE `AmpParams`, not inside it. `AmpParams` is ten fixed fields and
+ * a Princeton 5F2-A has Volume and Tone, so putting one through that type
+ * means five fields that lie. Amps differ in topology, not just in numbers —
+ * see `circuit-amp/types.ts`.
+ *
+ * `wireChain` builds this OR `amp`, never both. A signal chain has one amp,
+ * and letting both run would be a bug that sounds like a feature.
+ */
+export interface CircuitAmpParams {
+  /** Whether this stage is currently in the audio chain. `undefined` = on. */
+  readonly enabled?: boolean;
+  /** Which circuit. See `circuit-amp/registry.ts`; an unknown id falls back to
+   *  the default, so the chain always builds. */
+  readonly ampId: string;
+  /** dB. Signal level going INTO the amp — the equivalent of a boost pedal or
+   *  a hot pickup in front of it. Present on every circuit amp whatever its
+   *  topology.
+   *
+   *  NOT the amp's Volume. On a 5F2-A the Volume is inside the circuit,
+   *  between the first triode and the tone network, and sets how hard the
+   *  second stage and the power tube are driven. Turn one up and the other
+   *  down and you get different sounds at the same output level — which is the
+   *  point of having both. */
+  readonly inputGainDb: number;
+  /** Knob positions, keyed by the ids this amp's definition declares. A
+   *  declared key that is missing uses that control's `default`; a key the amp
+   *  does not declare is ignored, so a stale value left behind by an amp
+   *  change cannot reach a node. */
+  readonly controls: Readonly<Record<string, number>>;
+}
+
 /** Per-voice algorithmic reverb. Sits in the chain between the amp and the
  *  cab — analogous to a spring reverb tank inside a guitar amp. Implemented
  *  as `Tone.JCReverb` (Schroeder-style, naturally spring-like character).
@@ -347,8 +381,11 @@ export interface EffectsConfig {
   // Pre-amp tone shaper (graphic EQ, post-pedalboard)
   readonly graphicEq?: GraphicEqParams;
 
-  // Amp stage
+  // Amp stage — one of these two, never both.
   readonly amp?: AmpParams;
+  /** Experimental circuit-modelled amp. Takes the amp's slot when present and
+   *  enabled, and `amp` is skipped entirely. */
+  readonly circuitAmp?: CircuitAmpParams;
 
   // Post-amp per-voice reverb (spring/plate analogue)
   readonly reverb?: VoiceReverbParams;
