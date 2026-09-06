@@ -310,6 +310,14 @@ vi.mock('tone', () => {
     // Voice's chain wiring, not Tone's DSP.
     Convolver: class extends MockNode {},
     JCReverb: class extends MockNode {},
+    // The circuit amp's supply side chain. Plain nodes -- these tests assert
+    // that a knob reaches a node, not what a rectifier does.
+    Follower: class extends MockNode {
+      constructor(public smoothing?: number) { super(); }
+    },
+    Scale: class extends MockNode {
+      constructor(public min: number, public max: number) { super(); }
+    },
     WaveShaper: class extends MockNode {
       constructor(_curve?: unknown, _size?: number) { super(); }
       oversample = 'none';
@@ -715,5 +723,80 @@ describe('Voice — the level taps report PEAK, not RMS', () => {
     const v = new Voice(ACOUSTIC_GUITAR_PRESET);
     v.play('A3', '4n', 0);
     expect(v.getOutputLevelDb()).toBe(-Infinity);
+  });
+});
+
+describe('Voice.swapPreset — a circuit amp retunes in place', () => {
+  /**
+   * The circuit amp was wired into the chain BUILDER and never into the update
+   * path: `sameEffectsShape` did not compare it and `updateEffects` did not
+   * apply it. So its knobs were written onto the preset and reached no node,
+   * silently -- and the only change that moved the sound was a source change,
+   * which rebuilds the whole graph for its own reasons.
+   *
+   * That is why a knob turn on the composition page had to rebuild the entire
+   * voice, which re-downloads the sample pack.
+   */
+  const CIRCUIT = { ampId: 'princeton-5f2a', inputGainDb: 0 };
+
+  function circuitPreset(controls: Record<string, number>, ampId = CIRCUIT.ampId) {
+    return {
+      ...ELECTRIC_GUITAR_PRESET,
+      effects: { ...ELECTRIC_GUITAR_PRESET.effects, circuitAmp: { ...CIRCUIT, ampId, controls } },
+    };
+  }
+
+  interface Pots {
+    volumeGain: { gain: { value: number } };
+    toneFilter: { frequency: { value: number } };
+  }
+
+  function pots(v: Voice): Pots {
+    const chain = (v as unknown as { _chain: { circuitAmp?: Pots } })._chain;
+    if (!chain.circuitAmp) throw new Error('no circuit amp in the chain');
+    return chain.circuitAmp;
+  }
+
+  it('moves the volume pot, without rebuilding the chain', () => {
+    const v = new Voice(circuitPreset({ volume: 0.2, tone: 0.5 }));
+    v.play('A3', '4n', 0);
+    const quiet = pots(v).volumeGain.gain.value;
+    const nodesBuiltSoFar = hoisted.calls.gainCtor;
+
+    v.swapPreset(circuitPreset({ volume: 0.9, tone: 0.5 }));
+
+    expect(pots(v).volumeGain.gain.value).toBeGreaterThan(quiet);
+    // The point of the whole exercise: retuned, not rebuilt.
+    expect(hoisted.calls.gainCtor).toBe(nodesBuiltSoFar);
+    v.dispose();
+  });
+
+  it('moves the tone pot', () => {
+    const v = new Voice(circuitPreset({ volume: 0.5, tone: 0.5 }));
+    v.play('A3', '4n', 0);
+
+    // Both readings are taken AFTER a swap, so this measures the update path
+    // rather than the builder -- the Filter mock ignores its constructor
+    // options, so a value read at build time would prove nothing.
+    v.swapPreset(circuitPreset({ volume: 0.5, tone: 0.1 }));
+    const dark = pots(v).toneFilter.frequency.value;
+    v.swapPreset(circuitPreset({ volume: 0.5, tone: 0.9 }));
+
+    expect(pots(v).toneFilter.frequency.value).toBeGreaterThan(dark);
+    v.dispose();
+  });
+
+  it('rebuilds the chain when the amp itself changes', () => {
+    const v = new Voice(circuitPreset({ volume: 0.5, tone: 0.5 }));
+    v.play('A3', '4n', 0);
+    const nodesBuiltSoFar = hoisted.calls.gainCtor;
+
+    // A different circuit is a different node graph -- the stages and their
+    // component values are read off the amp's definition at build time -- so
+    // this one case must NOT take the in-place path.
+    v.swapPreset(circuitPreset({ volume: 0.5, tone: 0.5 }, 'some-other-amp'));
+
+    expect(hoisted.calls.gainCtor).toBeGreaterThan(nodesBuiltSoFar);
+    v.dispose();
   });
 });

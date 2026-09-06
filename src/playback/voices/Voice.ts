@@ -57,6 +57,7 @@ import { NotesBus } from './NotesBus';
 import { getAmpModel } from './amp-models';
 import { getCircuitAmp } from './circuit-amp/registry';
 import {
+  applyCircuitAmpLite,
   buildCircuitAmpLite,
   disposeCircuitAmpLite,
   type CircuitAmpLiteNodes,
@@ -671,6 +672,17 @@ export class Voice implements GuitarInstrument {
     if (next?.autoWah && this._chain.autoWah) applyAutoWah(this._chain.autoWah, next.autoWah);
     if (next?.graphicEq) applyGraphicEq(this._chain, next.graphicEq);
     if (next?.amp) applyAmp(this._chain, next.amp);
+    // Without this a circuit amp's knobs are stored on the preset and reach
+    // nothing: the stage was wired into `buildChain` and never into the update
+    // path, so every retune was silent and only a source change -- which
+    // rebuilds the whole graph -- ever moved it.
+    if (next?.circuitAmp && this._chain.circuitAmp) {
+      applyCircuitAmpLite(
+        this._chain.circuitAmp,
+        next.circuitAmp,
+        getCircuitAmp(next.circuitAmp.ampId),
+      );
+    }
     if (next?.reverb && this._chain.voiceReverb) applyVoiceReverb(this._chain.voiceReverb, next.reverb);
     if (next?.cabIR && this._chain.cabIRMakeup) {
       this._chain.cabIRMakeup.gain.rampTo(dbToGain(next.cabIR.makeupDb ?? 0), 0.02);
@@ -1442,6 +1454,12 @@ function sameEffectsShape(a: EffectsConfig | undefined, b: EffectsConfig | undef
     isStageEnabled(a?.autoWah) === isStageEnabled(b?.autoWah) &&
     isStageEnabled(a?.graphicEq) === isStageEnabled(b?.graphicEq) &&
     isStageEnabled(a?.amp) === isStageEnabled(b?.amp) &&
+    isStageEnabled(a?.circuitAmp) === isStageEnabled(b?.circuitAmp) &&
+    // A different circuit is a different node graph -- how many stages there
+    // are, what each one is and what its component values were are all read off
+    // the amp's DEFINITION at build time. So changing the amp is a rebuild, not
+    // a retune, for the same reason `cabIR.url` below is.
+    a?.circuitAmp?.ampId === b?.circuitAmp?.ampId &&
     isStageEnabled(a?.reverb) === isStageEnabled(b?.reverb) &&
     isStageEnabled(a?.cabIR) === isStageEnabled(b?.cabIR) &&
     isStageEnabled(a?.finalEq) === isStageEnabled(b?.finalEq) &&
