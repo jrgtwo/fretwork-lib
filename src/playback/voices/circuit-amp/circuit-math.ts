@@ -113,120 +113,146 @@ export function audioTaper(position: number): number {
   return Math.pow(10, (SPAN_DB * (p - 1)) / 20);
 }
 
-/** What a pair of wiper-tied volume pots hands the stage after them. */
-export interface ChannelGains {
-  /** Linear gain from the Normal channel's plate to the shared node. */
+/** The component values the 5E3's volume/tone node is built from. Real ohms
+ *  and farads, because the behaviour here is a resistive network working
+ *  against two caps and no normalised stand-in reproduces it. */
+export interface SharedNodeCircuit {
+  /** Ω. Each volume pot's track. 1 MΩ on a 5E3, and both are the same. */
+  readonly volumePotOhms: number;
+  /** Ω. A channel's plate source impedance — the tube's `r_p` in parallel
+   *  with its plate load. About 20 kΩ for a 12AY7 into 100 kΩ. */
+  readonly plateSourceOhms: number;
+  /** Ω. The tone pot's track. */
+  readonly tonePotOhms: number;
+  /** Farads. The cap from the tone pot's lower end to ground. */
+  readonly toneCapFarads: number;
+  /** Farads. The cap from V1B's plate to the tone pot's upper end. */
+  readonly brightCapFarads: number;
+}
+
+/** What the node hands the stage after it. The two gains are the resistive
+ *  path; the tone and bright figures describe the two reactive branches the
+ *  renderer builds as filters. */
+export interface SharedNodeResponse {
+  /** Linear gain, V1A's plate to the shared node. */
   readonly normal: number;
-  /** Linear gain from the Bright channel's plate to the shared node. */
+  /** Linear gain, V1B's plate to the shared node. */
   readonly bright: number;
-  /** Hz. Set by the shared node's SOURCE IMPEDANCE, which peaks where a pot's
-   *  wiper splits its track evenly — POSITION 0.85 on a 40 dB audio taper. So
-   *  this is DARKEST around 8-9 on the dial and brighter at both ends, not
-   *  monotonic in either pot. */
-  readonly sharedNodeCornerHz: number;
+  /** Ω. The node's own source impedance — what both caps work against. */
+  readonly nodeOhms: number;
+  /** Hz. The tone shelf's corner. */
+  readonly toneCornerHz: number;
+  /** 0..1 linear. What survives ABOVE that corner. 1 is no cut at all. */
+  readonly tonePlateau: number;
+  /** Hz. Where the bright cap starts injecting. */
+  readonly brightCornerHz: number;
+  /** 0..1 linear. How much of V1B's plate reaches the node above it. */
+  readonly brightInjection: number;
 }
 
 /**
- * Two volume pots whose wipers tie to ONE node at the next stage's grid.
+ * The 5E3's volume and tone controls, which are ONE network and not three.
  *
- * This is the 5E3's jumper interaction and its "coupled tone" behaviour, which
- * are the same mechanism seen twice.
+ * ── The wiring, which is not the obvious one ────────────────────────
  *
- * ── The shape, which is not the obvious one ─────────────────────────
+ * A 5E3's volume pots ARE V2A's grid leak. Each pot's track runs from the
+ * shared grid node to ground, and the channel's signal arrives at the WIPER —
+ * not at the top of the track with the wiper as the output, which is how a
+ * volume pot is normally drawn and how this file modelled it until the
+ * schematic was read.
  *
- * Each pot is its channel's plate across a track to ground with the wiper
- * tapped off. Taking `a = audioTaper(position)` as the fraction below the
- * wiper, one pot alone is a Thevenin source of `V·a` behind `R·a(1−a)`.
+ * Everything follows from that, and most of it is the reverse of the
+ * conventional arrangement:
  *
- * That impedance is ZERO AT BOTH ENDS of rotation and maximum where the wiper
- * splits the track evenly. So a pot at zero is a short from the shared node to
- * ground and collapses the OTHER channel; a pot at full clamps the node to its
- * own plate and swamps the other; and the two interfere least in between. A
- * monotonic "more rotation = more loading" model gets this backwards at the
- * bottom of the dial, which is exactly where players notice it.
+ *   - A pot at ZERO grounds its own wiper and presents its full 1 MΩ to the
+ *     node. Its channel goes silent and the OTHER channel is barely touched.
+ *   - A pot at FULL puts the wiper at the grid end, so V1's ~20 kΩ plate
+ *     impedance clamps the node and swamps the other channel. Turning a
+ *     channel UP is what steals from the other one — which is what Deluxe
+ *     players actually describe.
+ *   - The node's impedance therefore falls MONOTONICALLY as the volumes come
+ *     up, 500 kΩ down to about 10 kΩ, so the amp gets brighter as it is turned
+ *     up. There is no darkest point mid-dial.
  *
- * ⚠ THE TAPER MOVES THE PEAK UP THE DIAL. The impedance peaks where the wiper
- * splits the track evenly, `a = 0.5`, and on this file's 40 dB `audioTaper`
- * that is POSITION 0.85 — not mid rotation. The corner runs 3567 Hz at 0.05,
- * 1746 at 0.5, 400 at 0.85 and back to 4000 at full. Do not "fix" it to peak
- * at 0.5; that is the linear-pot answer to an audio-pot circuit.
+ * ── Why the tone control is in here ─────────────────────────────────
  *
- * `loadingStrength` 0..1 blends between two independent pots (0 — no shared
- * node, the shape the single-channel fallback uses) and the ideal tied-wiper
- * circuit (1). A real amp is near 1 but not at it: wiper and track resistance
- * and the grid stopper soften both nulls, so nothing truly reaches silence.
- * Where exactly is a number to find by ear.
+ * Because it hangs off the same node. Its wiper joins the two volume pots at
+ * V2A's grid; below it the .005 shunts treble to ground, and above it the
+ * .0005 bright cap feeds it from V1B's plate. So the tone pot loads the node
+ * the volumes are fighting over, and the volumes set the impedance the tone
+ * cap works against. That mutual dependence is the amp's character and it
+ * cannot be expressed as three independent controls.
  *
- * ⚠ IDEALISED, NOT MEASURED. The SHAPE is the circuit's — the nulls at both
- * ends and the maximum in the middle are what a tied-wiper pair does. The
- * strength is provisional like everything in a `circuit` block. See
- * `docs/SPEC-circuit-amp.md` for the circuit questions still open on this amp.
+ * The tone branch is a first-order SHELF, not a lowpass: flat below
+ * `toneCornerHz`, falling to `tonePlateau` above it. A renderer builds it as a
+ * direct path at `tonePlateau` summed with a lowpass at `toneCornerHz` scaled
+ * by `1 - tonePlateau`.
+ *
+ * ⚠ THE BRIGHT CAP TRACKS THE TONE POT. It does not bridge a volume pot. Its
+ * injection is summed at the node AHEAD of the tone shelf, so what is audible
+ * is `brightInjection * tonePlateau`.
+ *
+ * ⚠ IDEALISED, NOT MEASURED. The topology is the schematic's and the component
+ * values come from it. What is provisional is everything a schematic cannot
+ * say: the pots' tapers, `plateSourceOhms`, and `MIN_WIPER_OHMS`. See
+ * `docs/SPEC-circuit-amp.md`.
  */
-export function coupledChannelGains(
+export function sharedNodeResponse(
   normalPosition: number,
   brightPosition: number,
-  loadingStrength: number,
-  minCornerHz: number,
-  maxCornerHz: number,
-): ChannelGains {
-  const an = audioTaper(clamp01(normalPosition));
-  const ab = audioTaper(clamp01(brightPosition));
-  const k = clamp01(loadingStrength);
+  tonePosition: number,
+  circuit: SharedNodeCircuit,
+): SharedNodeResponse {
+  // A pot never reaches a true zero: wiper contact and the track's own end
+  // resistance stop it. Without a floor the tone control's cut is infinite at
+  // one end of its travel. Provisional, like every number in a `circuit` block.
+  const MIN_WIPER_OHMS = 500;
 
-  const rn = an * (1 - an);
-  const rb = ab * (1 - ab);
-  const total = rn + rb;
+  const { volumePotOhms: rv, plateSourceOhms: rs, tonePotOhms: rt } = circuit;
 
-  // Both pots at an extreme at once is the one degenerate case: two ideal
-  // sources shorted together. Split it evenly rather than dividing by zero.
-  const coupledNormal = total > 0 ? (an * rb) / total : an / 2;
-  const coupledBright = total > 0 ? (ab * rn) / total : ab / 2;
+  /** One channel, reduced to a Thevenin source at the shared node.
+   *
+   *  `a` is the fraction of the track between the wiper and the GROUNDED end,
+   *  so `a = 0` is the pot turned down. The remainder sits between the wiper
+   *  and the grid node, carrying no current of its own — V2A's grid draws
+   *  none — which is why a closed channel is a resistor to ground rather than
+   *  a short. */
+  const leg = (position: number) => {
+    const a = audioTaper(clamp01(position));
+    const toGround = rv * a;
+    const toGrid = rv * (1 - a);
+    const vth = toGround > 0 ? toGround / (rs + toGround) : 0;
+    return { vth, zth: parallel(rs, toGround) + toGrid };
+  };
 
-  // The node's source impedance, normalised against its own maximum (both
-  // pots at mid, where r = 0.25 each and the parallel pair is 0.125).
-  const MAX_PARALLEL = 0.125;
-  const impedance = total > 0 ? (rn * rb) / total / MAX_PARALLEL : 0;
+  const n = leg(normalPosition);
+  const b = leg(brightPosition);
+  const yn = 1 / n.zth;
+  const yb = 1 / b.zth;
+  const nodeOhms = 1 / (yn + yb);
 
-  // A HIGHER source impedance hands the following cap a LOWER corner. So the
-  // amp is darkest in the middle of the dial. `k` scales it because with no
-  // shared node there is no such corner at all.
-  const z = clamp01(impedance) * k;
-  const sharedNodeCornerHz = maxCornerHz * Math.pow(minCornerHz / maxCornerHz, z);
+  // The tone pot's lower section, between its wiper and the .005 to ground.
+  const toneToCap = Math.max(MIN_WIPER_OHMS, rt * audioTaper(clamp01(tonePosition)));
+  // Its upper section, between the wiper and the .0005 from V1B's plate.
+  const toneToBright = rt * (1 - audioTaper(clamp01(tonePosition)));
 
   return {
-    normal: an * (1 - k) + coupledNormal * k,
-    bright: ab * (1 - k) + coupledBright * k,
-    sharedNodeCornerHz,
+    normal: (n.vth * yn) / (yn + yb),
+    bright: (b.vth * yb) / (yn + yb),
+    nodeOhms,
+    toneCornerHz: cornerHz(nodeOhms + toneToCap, circuit.toneCapFarads),
+    tonePlateau: toneToCap / (nodeOhms + toneToCap),
+    brightCornerHz: cornerHz(nodeOhms + toneToBright + rs, circuit.brightCapFarads),
+    brightInjection: nodeOhms / (nodeOhms + toneToBright + rs),
   };
 }
 
-/**
- * The treble lift a bright cap across a volume pot produces, in DECIBELS for a
- * high-shelf.
- *
- * The cap is a path around the pot that only treble takes. With the pot down,
- * most of the signal is being dropped and the cap carries the top end past it,
- * so the lift is large. With the pot full the wiper is at the top and there is
- * nothing to bypass, so the lift is exactly 0 dB — not "small", zero.
- *
- * ⚠ IT TRACKS THE TAPER, NOT THE ROTATION. What the cap bypasses is the
- * attenuation the pot is applying, and on this file's 40 dB `audioTaper` an
- * audio pot is already 20 dB down at half rotation. A lift interpolated
- * linearly in position would fade out long before the attenuation it exists to
- * bypass does.
- *
- * dB rather than a linear factor because `Tone.Filter`'s `highshelf` reads its
- * `gain` param in dB — a linear 4 arriving as +4 dB is a bug that sounds
- * plausible.
- *
- * @param depth 0..1. Lift at pot minimum, as a fraction of MAX_LIFT_DB. 0 is a
- *   channel with no bright cap at all, which is what the Normal channel gets.
- */
-export function brightCapShelfDb(volumePosition: number, depth: number): number {
-  const p = clamp01(volumePosition);
-  const d = clamp01(depth);
-  const MAX_LIFT_DB = 12;
-  return d * MAX_LIFT_DB * (1 - audioTaper(p));
+function parallel(a: number, b: number): number {
+  return a + b === 0 ? 0 : (a * b) / (a + b);
+}
+
+function cornerHz(ohms: number, farads: number): number {
+  return 1 / (2 * Math.PI * ohms * farads);
 }
 
 /**

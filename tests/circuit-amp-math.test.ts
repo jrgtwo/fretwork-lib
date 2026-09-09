@@ -15,8 +15,7 @@ import {
   transformerCurve,
   tonePotCutoffHz,
   audioTaper,
-  coupledChannelGains,
-  brightCapShelfDb,
+  sharedNodeResponse,
   pushPullCurve,
 } from '../src/playback/voices/circuit-amp/circuit-math';
 
@@ -110,121 +109,133 @@ describe('audioTaper', () => {
   });
 });
 
-describe('coupledChannelGains', () => {
-  const K = 1; // fully coupled, which is what the amp ships
+/**
+ * The 5E3's volume/tone node, from the 1957 Deluxe schematic.
+ *
+ * Both volume pots are 1 MΩ audio, the tone pot 1 MΩ audio, the tone cap
+ * .005 µF and the bright cap .0005 µF. V1 is a 12AY7 into a 100 kΩ plate load,
+ * so each channel's source impedance is r_p ‖ R_L, about 20 kΩ.
+ */
+const NODE_5E3 = {
+  volumePotOhms: 1_000_000,
+  plateSourceOhms: 20_000,
+  tonePotOhms: 1_000_000,
+  toneCapFarads: 5e-9,
+  brightCapFarads: 5e-10,
+} as const;
 
-  // ⚠ THE ONE THAT MATTERS. Both pot wipers tie to ONE node at the next
-  // stage's grid, so a pot at zero is a short from that node to ground. It
-  // does not merely turn its own channel down — it takes the OTHER channel
-  // with it. This is the 5E3 interaction, and a mixer cannot fake it.
-  it('collapses the other channel when a pot is turned to zero', () => {
-    const alone = coupledChannelGains(0.5, 0.7, K, 400, 4000).bright;
-    const shorted = coupledChannelGains(0, 0.7, K, 400, 4000).bright;
-    expect(shorted).toBeLessThan(alone / 100);
+describe('sharedNodeResponse', () => {
+  // ⚠ THE ONE THAT MATTERS, AND IT IS THE REVERSE OF A CONVENTIONAL POT.
+  // A 5E3's volume pots ARE V2A's grid leak: the track runs from the grid node
+  // to ground and the channel's signal arrives at the WIPER. So a pot at zero
+  // grounds its own wiper — that channel goes silent — and presents its FULL
+  // 1 MΩ track to the shared node, which is a light load. It does NOT drag the
+  // other channel down with it. A conventional divider model says it shorts
+  // the node, and that is the model this file used to hold.
+  it('silences its own channel and leaves the other almost untouched at zero', () => {
+    const r = sharedNodeResponse(1, 0, 0.5, NODE_5E3);
+    expect(r.bright).toBe(0);
+    expect(r.normal).toBeGreaterThan(0.9); // measures 0.9615
   });
 
-  // The other end of the same mechanism: a pot at full clamps the node to its
-  // own plate and swamps the other channel.
-  it('swamps the other channel when a pot is turned to full', () => {
-    const alone = coupledChannelGains(0.5, 0.7, K, 400, 4000).bright;
-    const clamped = coupledChannelGains(1, 0.7, K, 400, 4000).bright;
-    expect(clamped).toBeLessThan(alone / 100);
+  // The real interaction, and it runs the other way: turning a channel UP is
+  // what steals from the other. At full the wiper sits at the grid end, so
+  // V1's ~20 kΩ plate impedance clamps the node and swallows whatever the
+  // other channel is contributing through its far higher impedance.
+  it('swamps the other channel when a pot is turned up, not down', () => {
+    const closed = sharedNodeResponse(1, 0, 0.5, NODE_5E3).normal;
+    const open = sharedNodeResponse(1, 1, 0.5, NODE_5E3).normal;
+    expect(open).toBeLessThan(closed * 0.6); // 0.4902 against 0.9615
   });
 
-  // Interference is WEAKEST in the middle, where both source impedances are
-  // highest. A monotonic "more rotation = more loading" model — which is what
-  // this plan's first draft shipped — gets this exactly backwards.
-  it('interferes least at mid rotation', () => {
-    const mid = coupledChannelGains(0.5, 0.5, K, 400, 4000);
-    const nearZero = coupledChannelGains(0.05, 0.5, K, 400, 4000);
-    const nearFull = coupledChannelGains(0.99, 0.5, K, 400, 4000);
-    expect(mid.bright).toBeGreaterThan(nearZero.bright);
-    expect(mid.bright).toBeGreaterThan(nearFull.bright);
+  // ⚠ MONOTONIC, and a conventional-pot model gets this wrong in both
+  // directions. The node's source impedance falls steadily as the volumes come
+  // up — 500 kΩ with both closed down to about 10 kΩ with both wide open — so
+  // the amp gets BRIGHTER as it is turned up. There is no darkest point
+  // mid-dial and no brightening again at the top.
+  it('drops its node impedance monotonically as the volumes come up', () => {
+    const at = (p: number) => sharedNodeResponse(p, p, 0.5, NODE_5E3).nodeOhms;
+    expect(at(0)).toBeGreaterThan(at(0.5));
+    expect(at(0.5)).toBeGreaterThan(at(0.85));
+    expect(at(0.85)).toBeGreaterThan(at(1));
   });
 
-  // The corner follows the node's SOURCE IMPEDANCE, which peaks where the
-  // wiper splits the track evenly — a = 0.5. On a 40 dB audio taper that is
-  // POSITION 0.85, not mid rotation. So the amp darkens as the volume comes
-  // up, bottoms out around 8-9 on the dial, and brightens again at full.
-  // Non-monotonic in a way a mixer cannot fake and a linear-pot model gets
-  // wrong. Measured: 3567 Hz at 0.05, 1746 at 0.5, 400 at 0.85, 4000 at full.
-  it('is darkest high on the dial, not at mid rotation', () => {
-    const at = (p: number) => coupledChannelGains(p, p, K, 400, 4000).sharedNodeCornerHz;
-    expect(at(0.85)).toBeLessThan(at(0.5));
-    expect(at(0.85)).toBeLessThan(at(0.05));
-    expect(at(0.85)).toBeLessThan(at(1));
-    // and it is genuinely non-monotonic, not just falling
-    expect(at(1)).toBeGreaterThan(at(0.95));
+  // The same fact heard rather than measured: a lower node impedance hands the
+  // tone cap a higher corner. 53 Hz with the volumes down, 290 Hz wide open.
+  it('raises the tone corner as the volumes come up', () => {
+    const at = (p: number) => sharedNodeResponse(p, p, 0.5, NODE_5E3).toneCornerHz;
+    expect(at(1)).toBeGreaterThan(at(0.5));
+    expect(at(0.5)).toBeGreaterThan(at(0));
   });
 
-  it('is symmetric between the two channels', () => {
-    const a = coupledChannelGains(0.3, 0.8, K, 400, 4000);
-    const b = coupledChannelGains(0.8, 0.3, K, 400, 4000);
-    expect(a.normal).toBeCloseTo(b.bright, 10);
-    expect(a.bright).toBeCloseTo(b.normal, 10);
+  // The tone network is a first-order SHELF, not a lowpass: below the corner
+  // it passes everything, above it what survives is `tonePlateau`. Tone down
+  // puts the wiper on the cap and shunts the top end away; tone up puts a
+  // megohm in series with the cap and there is nothing left to shunt.
+  it('cuts treble hardest with the tone pot down and barely at all at full', () => {
+    expect(sharedNodeResponse(1, 1, 0, NODE_5E3).tonePlateau).toBeLessThan(0.1);
+    expect(sharedNodeResponse(1, 1, 1, NODE_5E3).tonePlateau).toBeGreaterThan(0.9);
   });
 
-  // loadingStrength 0 is the escape hatch: two independent pots and NO shared
-  // node, which is the shape the de-scoped single-channel fallback uses. The
-  // corner must go constant too — the first draft's ignored `k` entirely and
-  // still swept a corner for a circuit that was not there.
-  it('becomes two independent pots at loadingStrength 0', () => {
-    for (const [n, b] of [[0, 0.7], [0.5, 0.5], [1, 0.2]] as const) {
-      const g = coupledChannelGains(n, b, 0, 400, 4000);
-      expect(g.normal).toBeCloseTo(audioTaper(n), 10);
-      expect(g.bright).toBeCloseTo(audioTaper(b), 10);
-      expect(g.sharedNodeCornerHz).toBeCloseTo(4000, 6);
-    }
-  });
-
-  it('stays inside the declared corner range and never returns a non-finite gain', () => {
-    for (const n of [0, 0.02, 0.25, 0.5, 0.75, 0.98, 1]) {
-      for (const b of [0, 0.02, 0.25, 0.5, 0.75, 0.98, 1]) {
-        const g = coupledChannelGains(n, b, K, 400, 4000);
-        expect(Number.isFinite(g.normal)).toBe(true);
-        expect(Number.isFinite(g.bright)).toBe(true);
-        expect(g.sharedNodeCornerHz).toBeGreaterThanOrEqual(400);
-        expect(g.sharedNodeCornerHz).toBeLessThanOrEqual(4000);
+  it('never boosts through the tone network', () => {
+    for (const v of [0, 0.3, 0.7, 1]) {
+      for (const t of [0, 0.3, 0.7, 1]) {
+        expect(sharedNodeResponse(v, v, t, NODE_5E3).tonePlateau).toBeLessThanOrEqual(1);
       }
     }
   });
-});
 
-describe('brightCapShelfDb', () => {
-  // A cap across the volume pot bypasses the pot at treble frequencies. Its
-  // effect is strongest when the pot is DOWN — most of the signal is being
-  // dropped and the cap is the only path around it — and is exactly nothing at
-  // full rotation, where the wiper is at the top and there is nothing to
-  // bypass.
-  it('is strongest at low volume and exactly zero at full', () => {
-    expect(brightCapShelfDb(0.1, 0.8)).toBeGreaterThan(brightCapShelfDb(0.5, 0.8));
-    expect(brightCapShelfDb(0.5, 0.8)).toBeGreaterThan(brightCapShelfDb(1, 0.8));
-    expect(brightCapShelfDb(1, 0.8)).toBe(0);
+  // ⚠ THE BRIGHT CAP TRACKS THE TONE POT, NOT THE VOLUME. The .0005 does not
+  // bridge a volume pot — it feeds the TOP of the tone pot from V1B's plate,
+  // so how much treble it injects depends on how close the tone wiper sits to
+  // that end. The renderer sums the injection at the node AHEAD of the tone
+  // shelf, so what is actually audible is the product of the two.
+  it('injects through the bright cap only as the tone pot comes up', () => {
+    const audible = (t: number) => {
+      const r = sharedNodeResponse(0.5, 0.5, t, NODE_5E3);
+      return r.brightInjection * r.tonePlateau;
+    };
+    expect(audible(1)).toBeGreaterThan(audible(0) * 100); // 0.657 against 3.4e-4
   });
 
-  // ⚠ THE ONE THAT IS NOT A RESTATEMENT OF THE FORMULA. The cap bypasses the
-  // pot, so the lift must track the ATTENUATION the pot is applying — which
-  // follows the audio taper, not the rotation. A lift linear in position (the
-  // first draft) decays out of step with what it is bypassing: at half
-  // rotation an audio pot is already 20 dB down while a linear lift has only
-  // given up half its range.
-  it('tracks the pot attenuation it is bypassing, not the rotation', () => {
-    const halfRotation = brightCapShelfDb(0.5, 1);
-    const full = brightCapShelfDb(0, 1);
-    // audioTaper(0.5) is 0.1 — the pot is 20 dB down at half rotation, so the
-    // cap is still doing 90% of its work there (10.8 dB of 12). A lift linear
-    // in POSITION would have given up half its range by now (6.0 dB), so this
-    // threshold separates the two models.
-    expect(halfRotation).toBeGreaterThan(full * 0.75);
+  // And it fades as the amp is turned up, which is what a bright cap is for.
+  // The node impedance it works against collapses, so less of it reaches.
+  it('fades the bright injection as the volumes come up', () => {
+    const audible = (v: number) => {
+      const r = sharedNodeResponse(v, v, 1, NODE_5E3);
+      return r.brightInjection * r.tonePlateau;
+    };
+    expect(audible(0.1)).toBeGreaterThan(audible(1) * 1.5); // 0.642 against 0.326
   });
 
-  it('is silent everywhere at depth 0', () => {
-    for (const p of [0, 0.25, 0.5, 0.75, 1]) expect(brightCapShelfDb(p, 0)).toBe(0);
+  // The resistive path is symmetric — both channels see identical pots and
+  // plate loads. Only the bright cap is asymmetric, and it is not in here.
+  it('is symmetric between the two channels in its resistive path', () => {
+    const a = sharedNodeResponse(0.3, 0.8, 0.5, NODE_5E3);
+    const b = sharedNodeResponse(0.8, 0.3, 0.5, NODE_5E3);
+    expect(a.normal).toBeCloseTo(b.bright, 10);
+    expect(a.bright).toBeCloseTo(b.normal, 10);
+    expect(a.nodeOhms).toBeCloseTo(b.nodeOhms, 6);
   });
 
-  it('never cuts', () => {
-    for (const p of [0, 0.25, 0.5, 0.75, 1]) {
-      expect(brightCapShelfDb(p, 1)).toBeGreaterThanOrEqual(0);
+  it('stays finite and in range across the whole control surface', () => {
+    for (const n of [0, 0.02, 0.5, 0.98, 1]) {
+      for (const b of [0, 0.02, 0.5, 0.98, 1]) {
+        for (const t of [0, 0.5, 1]) {
+          const r = sharedNodeResponse(n, b, t, NODE_5E3);
+          for (const v of [r.normal, r.bright, r.nodeOhms, r.toneCornerHz, r.brightCornerHz]) {
+            expect(Number.isFinite(v)).toBe(true);
+          }
+          expect(r.normal).toBeGreaterThanOrEqual(0);
+          expect(r.normal).toBeLessThanOrEqual(1);
+          expect(r.bright).toBeGreaterThanOrEqual(0);
+          expect(r.bright).toBeLessThanOrEqual(1);
+          expect(r.nodeOhms).toBeGreaterThan(0);
+          expect(r.tonePlateau).toBeGreaterThan(0);
+          expect(r.brightInjection).toBeGreaterThanOrEqual(0);
+          expect(r.brightInjection).toBeLessThanOrEqual(1);
+        }
+      }
     }
   });
 });

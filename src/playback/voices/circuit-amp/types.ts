@@ -32,6 +32,8 @@
  * `wireChain` do not change again.
  */
 
+import type { SharedNodeCircuit } from './circuit-math';
+
 interface CircuitAmpControlCommon {
   /** Stable id. Becomes the key under `effects.circuitAmp.controls`.
    *
@@ -133,24 +135,17 @@ export interface PushPullStage {
 }
 
 /**
- * Two volume pots whose wipers tie to ONE node at the next stage's grid.
+ * Both volume pots and the tone pot, which on a 5E3 are ONE network at V2A's
+ * grid — not three controls that happen to sit near each other.
  *
- * The 5E3's jumper interaction and its "coupled tone" behaviour are the same
- * mechanism seen twice. `coupledChannelGains` in `circuit-math.ts` carries the
- * shape and the warning that goes with it — the loading is NOT monotonic in
- * either pot.
+ * Declared as real component values rather than normalised strengths, because
+ * the behaviour comes from a resistive network working against two caps and
+ * no stand-in reproduces it. `sharedNodeResponse` in `circuit-math.ts` carries
+ * the model and the warning that goes with it: the volume pots are wired as
+ * V2A's grid leak, so the interaction runs the opposite way to a conventional
+ * pot — a channel turned UP is what steals from the other.
  */
-export interface SharedNodeCoupling {
-  /** 0..1. How hard the two volume pots load each other. 0 = independent. */
-  readonly loadingStrength: number;
-  /** Hz at both pots down / both pots up — what the tone network sees. */
-  readonly minCornerHz: number;
-  readonly maxCornerHz: number;
-  /** 0..1. The bright channel's treble bypass at pot minimum. */
-  readonly brightCapDepth: number;
-  /** Hz. Where that bypass starts lifting. */
-  readonly brightCapCornerHz: number;
-}
+export type SharedNodeCoupling = SharedNodeCircuit;
 
 /** A cathodyne (split-load) phase inverter — one triode producing two
  *  opposed outputs, one off the plate and one off the cathode. */
