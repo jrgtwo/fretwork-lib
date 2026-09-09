@@ -63,6 +63,7 @@ export const PRINCETON_5F2A: CircuitAmp = {
     },
   ],
   circuit: {
+    topology: 'single-ended',
     triode1: { gainDb: 26, asymmetry: 0.35, couplingHpfHz: 12, millerLpfHz: 11000 },
     triode2: { gainDb: 22, asymmetry: 0.45, couplingHpfHz: 20, millerLpfHz: 9000 },
     tone: { minCutoffHz: 900, maxCutoffHz: 12000 },

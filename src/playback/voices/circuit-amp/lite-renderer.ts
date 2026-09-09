@@ -7,6 +7,17 @@
  * be usable, not identical. What the two share is the amp's DEFINITION — its
  * identity, its controls and its component values.
  *
+ * ── How an amp is assembled ─────────────────────────────────────────────────
+ *
+ * Per-stage BUILDERS (`buildTriode`, `buildSupply`, `buildTransformer`) plus
+ * one ASSEMBLER per topology. The stages are what every amp shares; the
+ * assembler is what differs, because a push-pull amp with two input channels
+ * summing at one node is not a serial chain with more boxes in it. There is no
+ * graph walker, and over two amps there should not be one.
+ *
+ * Each builder wires its own internals and exposes `entry`/`exit`, so an
+ * assembler names stages rather than nodes.
+ *
  * ── What it cannot do ───────────────────────────────────────────────────────
  *
  * `Tone.WaveShaper` is memoryless: a sample in, a sample out, no state. So
@@ -27,7 +38,14 @@
  * explicit `Tone.Gain`. `circuit-math.ts` says why at length.
  */
 import * as Tone from 'tone';
-import type { CircuitAmp, CircuitAmpControl } from './types';
+import type {
+  CircuitAmp,
+  CircuitAmpControl,
+  OutputTransformer,
+  SingleEndedCircuit,
+  Supply,
+  TriodeStage,
+} from './types';
 import type { CircuitAmpParams } from '../types';
 import {
   triodeCurve,
@@ -37,34 +55,58 @@ import {
   audioTaper,
 } from './circuit-math';
 
-export interface CircuitAmpLiteNodes {
+/** One 12AX7 half: gain, curve, coupling cap, Miller roll-off. */
+export interface TriodeNodes {
+  readonly gain: Tone.Gain;
+  readonly shaper: Tone.WaveShaper;
+  readonly coupling: Tone.Filter;
+  readonly miller: Tone.Filter;
+  readonly entry: Tone.ToneAudioNode;
+  readonly exit: Tone.ToneAudioNode;
+}
+
+/** The supply. NOT a stage in series — `gain` sits in the signal path, and
+ *  `follower`/`scale` are a side chain that writes its param. */
+export interface SupplyNodes {
+  readonly follower: Tone.Follower;
+  readonly scale: Tone.Scale;
+  readonly gain: Tone.Gain;
+}
+
+export interface TransformerNodes {
+  readonly lf: Tone.Filter;
+  readonly shaper: Tone.WaveShaper;
+  readonly hf: Tone.Filter;
+  readonly entry: Tone.ToneAudioNode;
+  readonly exit: Tone.ToneAudioNode;
+}
+
+interface CircuitAmpLiteCommon {
   /** Signal level going INTO the amp. Not the amp's Volume. */
   readonly inputGain: Tone.Gain;
-  readonly triode1Gain: Tone.Gain;
-  readonly triode1Shaper: Tone.WaveShaper;
-  readonly triode1Coupling: Tone.Filter;
-  readonly triode1Miller: Tone.Filter;
-  /** The amp's Volume — INSIDE the circuit, after the first triode. */
-  readonly volumeGain: Tone.Gain;
-  readonly toneFilter: Tone.Filter;
-  readonly triode2Gain: Tone.Gain;
-  readonly triode2Shaper: Tone.WaveShaper;
-  readonly triode2Coupling: Tone.Filter;
-  readonly triode2Miller: Tone.Filter;
-  /** Side chain: follows the signal and droops the supply gain. */
-  readonly sagFollower: Tone.Follower;
-  readonly sagScale: Tone.Scale;
-  readonly sagGain: Tone.Gain;
+  readonly supply: SupplyNodes;
+  readonly transformer: TransformerNodes;
   readonly powerGain: Tone.Gain;
-  readonly powerShaper: Tone.WaveShaper;
-  readonly transformerLf: Tone.Filter;
-  readonly transformerShaper: Tone.WaveShaper;
-  readonly transformerHf: Tone.Filter;
   /** Where the chain connects INTO this amp. */
   readonly entry: Tone.ToneAudioNode;
   /** Where the chain resumes after it. */
   readonly exit: Tone.ToneAudioNode;
 }
+
+export interface SingleEndedLiteNodes extends CircuitAmpLiteCommon {
+  readonly topology: 'single-ended';
+  readonly triode1: TriodeNodes;
+  /** The amp's Volume — INSIDE the circuit, after the first triode. */
+  readonly volumeGain: Tone.Gain;
+  readonly toneFilter: Tone.Filter;
+  readonly triode2: TriodeNodes;
+  readonly powerShaper: Tone.WaveShaper;
+}
+
+/** One arm today. `PushPullDualChannelLiteNodes` joins it with the 5E3; the
+ *  union lands now because `Voice.ts` consumes this type and the narrowing has
+ *  to be in place while there is still only one thing to narrow to. */
+export type CircuitAmpLiteNodes = SingleEndedLiteNodes;
 
 function dbToGain(db: number): number {
   return Math.pow(10, db / 20);
@@ -90,21 +132,86 @@ export function controlValue(
   return typeof raw === 'number' ? raw : control.default;
 }
 
-export function buildCircuitAmpLite(
+// ── Stage builders ──────────────────────────────────────────────────────────
+
+export function buildTriode(stage: TriodeStage): TriodeNodes {
+  const gain = new Tone.Gain(dbToGain(stage.gainDb));
+  const shaper = new Tone.WaveShaper(triodeCurve(stage.asymmetry), 4096);
+  const coupling = new Tone.Filter({ type: 'highpass', frequency: stage.couplingHpfHz });
+  const miller = new Tone.Filter({ type: 'lowpass', frequency: stage.millerLpfHz });
+
+  gain.connect(shaper);
+  shaper.connect(coupling);
+  coupling.connect(miller);
+
+  return { gain, shaper, coupling, miller, entry: gain, exit: miller };
+}
+
+export function disposeTriode(nodes: TriodeNodes): void {
+  nodes.gain.dispose();
+  nodes.shaper.dispose();
+  nodes.coupling.dispose();
+  nodes.miller.dispose();
+}
+
+/**
+ * The supply.
+ *
+ * `gain` is built at ZERO on purpose. A signal-rate connection to an
+ * AudioParam SUMS with the param's own intrinsic value, so a gain built at 1
+ * and driven by this side chain would sit at 2 in silence — a silent +6 dB.
+ * The scale's output is the whole of this gain: 1 when the follower sees
+ * nothing, falling toward `1 - sagDepth` as the amp is worked. That is why
+ * Scale's range is written high-to-low.
+ *
+ * The assembler feeds `follower` from wherever the amp reads its load, and
+ * puts `gain` in series. Neither is done here, because which node that is
+ * differs by topology.
+ */
+export function buildSupply(supply: Supply): SupplyNodes {
+  const follower = new Tone.Follower(supply.smoothingSeconds);
+  const scale = new Tone.Scale(1, 1 - supply.sagDepth);
+  const gain = new Tone.Gain(0);
+
+  follower.connect(scale);
+  scale.connect(gain.gain);
+
+  return { follower, scale, gain };
+}
+
+export function disposeSupply(nodes: SupplyNodes): void {
+  nodes.follower.dispose();
+  nodes.scale.dispose();
+  nodes.gain.dispose();
+}
+
+export function buildTransformer(ot: OutputTransformer): TransformerNodes {
+  const lf = new Tone.Filter({ type: 'highpass', frequency: ot.lfCornerHz });
+  const shaper = new Tone.WaveShaper(transformerCurve(ot.saturation), 4096);
+  const hf = new Tone.Filter({ type: 'lowpass', frequency: ot.hfCornerHz });
+
+  lf.connect(shaper);
+  shaper.connect(hf);
+
+  return { lf, shaper, hf, entry: lf, exit: hf };
+}
+
+export function disposeTransformer(nodes: TransformerNodes): void {
+  nodes.lf.dispose();
+  nodes.shaper.dispose();
+  nodes.hf.dispose();
+}
+
+// ── Assemblers, one per topology ────────────────────────────────────────────
+
+function assembleSingleEnded(
   params: CircuitAmpParams,
   amp: CircuitAmp,
-): CircuitAmpLiteNodes {
-  const c = amp.circuit;
-
+  c: SingleEndedCircuit,
+): SingleEndedLiteNodes {
   const inputGain = new Tone.Gain(dbToGain(params.inputGainDb));
 
-  const triode1Gain = new Tone.Gain(dbToGain(c.triode1.gainDb));
-  const triode1Shaper = new Tone.WaveShaper(triodeCurve(c.triode1.asymmetry), 4096);
-  const triode1Coupling = new Tone.Filter({
-    type: 'highpass',
-    frequency: c.triode1.couplingHpfHz,
-  });
-  const triode1Miller = new Tone.Filter({ type: 'lowpass', frequency: c.triode1.millerLpfHz });
+  const triode1 = buildTriode(c.triode1);
 
   const volumeGain = new Tone.Gain(audioTaper(controlValue(params, amp, 'volume')));
   const toneFilter = new Tone.Filter({
@@ -116,79 +223,54 @@ export function buildCircuitAmpLite(
     ),
   });
 
-  const triode2Gain = new Tone.Gain(dbToGain(c.triode2.gainDb));
-  const triode2Shaper = new Tone.WaveShaper(triodeCurve(c.triode2.asymmetry), 4096);
-  const triode2Coupling = new Tone.Filter({
-    type: 'highpass',
-    frequency: c.triode2.couplingHpfHz,
-  });
-  const triode2Miller = new Tone.Filter({ type: 'lowpass', frequency: c.triode2.millerLpfHz });
-
-  // The supply.
-  //
-  // `sagGain` is built at ZERO on purpose. A signal-rate connection to an
-  // AudioParam SUMS with the param's own intrinsic value, so a gain built at 1
-  // and driven by this side chain would sit at 2 in silence — a silent +6 dB.
-  // The scale's output is the whole of this gain: 1 when the follower sees
-  // nothing, falling toward `1 - sagDepth` as the amp is worked. That is why
-  // Scale's range is written high-to-low.
-  const sagFollower = new Tone.Follower(c.supply.smoothingSeconds);
-  const sagScale = new Tone.Scale(1, 1 - c.supply.sagDepth);
-  const sagGain = new Tone.Gain(0);
+  const triode2 = buildTriode(c.triode2);
+  const supply = buildSupply(c.supply);
 
   const powerGain = new Tone.Gain(dbToGain(c.power.gainDb));
   const powerShaper = new Tone.WaveShaper(powerStageCurve(c.power.headroom), 4096);
 
-  const transformerLf = new Tone.Filter({ type: 'highpass', frequency: c.transformer.lfCornerHz });
-  const transformerShaper = new Tone.WaveShaper(transformerCurve(c.transformer.saturation), 4096);
-  const transformerHf = new Tone.Filter({ type: 'lowpass', frequency: c.transformer.hfCornerHz });
+  const transformer = buildTransformer(c.transformer);
 
   // Series path — the circuit, in signal order.
-  inputGain.connect(triode1Gain);
-  triode1Gain.connect(triode1Shaper);
-  triode1Shaper.connect(triode1Coupling);
-  triode1Coupling.connect(triode1Miller);
-  triode1Miller.connect(volumeGain);
+  inputGain.connect(triode1.entry);
+  triode1.exit.connect(volumeGain);
   volumeGain.connect(toneFilter);
-  toneFilter.connect(triode2Gain);
-  triode2Gain.connect(triode2Shaper);
-  triode2Shaper.connect(triode2Coupling);
-  triode2Coupling.connect(triode2Miller);
-  triode2Miller.connect(sagGain);
-  sagGain.connect(powerGain);
+  toneFilter.connect(triode2.entry);
+  triode2.exit.connect(supply.gain);
+  supply.gain.connect(powerGain);
   powerGain.connect(powerShaper);
-  powerShaper.connect(transformerLf);
-  transformerLf.connect(transformerShaper);
-  transformerShaper.connect(transformerHf);
+  powerShaper.connect(transformer.entry);
 
   // Side chain — reads the signal, writes a gain PARAM. Never in series.
-  triode2Miller.connect(sagFollower);
-  sagFollower.connect(sagScale);
-  sagScale.connect(sagGain.gain);
+  triode2.exit.connect(supply.follower);
 
   return {
+    topology: 'single-ended',
     inputGain,
-    triode1Gain,
-    triode1Shaper,
-    triode1Coupling,
-    triode1Miller,
+    triode1,
     volumeGain,
     toneFilter,
-    triode2Gain,
-    triode2Shaper,
-    triode2Coupling,
-    triode2Miller,
-    sagFollower,
-    sagScale,
-    sagGain,
+    triode2,
+    supply,
     powerGain,
     powerShaper,
-    transformerLf,
-    transformerShaper,
-    transformerHf,
+    transformer,
     entry: inputGain,
-    exit: transformerHf,
+    exit: transformer.exit,
   };
+}
+
+export function buildCircuitAmpLite(
+  params: CircuitAmpParams,
+  amp: CircuitAmp,
+): CircuitAmpLiteNodes {
+  const c = amp.circuit;
+  switch (c.topology) {
+    case 'single-ended':
+      return assembleSingleEnded(params, amp, c);
+    default:
+      throw new Error(`circuit-amp: no lite assembler for topology '${c.topology}'`);
+  }
 }
 
 /** Retune in place.
@@ -202,32 +284,30 @@ export function applyCircuitAmpLite(
   amp: CircuitAmp,
 ): void {
   nodes.inputGain.gain.value = dbToGain(params.inputGainDb);
-  nodes.volumeGain.gain.value = audioTaper(controlValue(params, amp, 'volume'));
-  nodes.toneFilter.frequency.value = tonePotCutoffHz(
-    controlValue(params, amp, 'tone'),
-    amp.circuit.tone.minCutoffHz,
-    amp.circuit.tone.maxCutoffHz,
-  );
+  switch (nodes.topology) {
+    case 'single-ended':
+      nodes.volumeGain.gain.value = audioTaper(controlValue(params, amp, 'volume'));
+      nodes.toneFilter.frequency.value = tonePotCutoffHz(
+        controlValue(params, amp, 'tone'),
+        amp.circuit.tone.minCutoffHz,
+        amp.circuit.tone.maxCutoffHz,
+      );
+      return;
+  }
 }
 
 export function disposeCircuitAmpLite(nodes: CircuitAmpLiteNodes): void {
   nodes.inputGain.dispose();
-  nodes.triode1Gain.dispose();
-  nodes.triode1Shaper.dispose();
-  nodes.triode1Coupling.dispose();
-  nodes.triode1Miller.dispose();
-  nodes.volumeGain.dispose();
-  nodes.toneFilter.dispose();
-  nodes.triode2Gain.dispose();
-  nodes.triode2Shaper.dispose();
-  nodes.triode2Coupling.dispose();
-  nodes.triode2Miller.dispose();
-  nodes.sagFollower.dispose();
-  nodes.sagScale.dispose();
-  nodes.sagGain.dispose();
+  disposeSupply(nodes.supply);
   nodes.powerGain.dispose();
-  nodes.powerShaper.dispose();
-  nodes.transformerLf.dispose();
-  nodes.transformerShaper.dispose();
-  nodes.transformerHf.dispose();
+  disposeTransformer(nodes.transformer);
+  switch (nodes.topology) {
+    case 'single-ended':
+      disposeTriode(nodes.triode1);
+      nodes.volumeGain.dispose();
+      nodes.toneFilter.dispose();
+      disposeTriode(nodes.triode2);
+      nodes.powerShaper.dispose();
+      return;
+  }
 }

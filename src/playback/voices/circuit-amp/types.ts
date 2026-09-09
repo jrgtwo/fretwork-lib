@@ -6,7 +6,16 @@
  * amplifier. Real amps differ in tube type, tone-network topology, phase
  * splitter, output-stage class, and whether the supply sags. A Champ has no
  * phase splitter at all; a Deluxe Reverb has tremolo and a reverb tank inside
- * the amp. So an amp here is a CIRCUIT DESCRIPTION, and a renderer walks it.
+ * the amp. So an amp here is a CIRCUIT DESCRIPTION.
+ *
+ * ── How a renderer reads it ─────────────────────────────────────────────────
+ *
+ * NOT by walking a graph. An amp DECLARES ITS TOPOLOGY — `CircuitAmpCircuit` is
+ * a discriminated union on that tag — and a renderer has one assembler per
+ * topology over a shared set of per-stage builders. The stages are the reuse;
+ * the assembler is the part that differs, because a push-pull amp with two
+ * input channels summing at one node is not a serial chain with more boxes in
+ * it. A general walker over two amps would be abstraction ahead of evidence.
  *
  * ── Two renderers read this file ────────────────────────────────────────────
  *
@@ -71,13 +80,67 @@ export interface ToneNetwork {
   readonly maxCutoffHz: number;
 }
 
-/** Single-ended output stage. No matched pair, so nothing cancels the even
- *  harmonics — the asymmetry is the sound. */
+/** A single-ended output stage's values. Which topology it belongs to is
+ *  declared by the circuit that holds it, not by this record. */
 export interface PowerStage {
   readonly gainDb: number;
   /** 0..1. How much of the curve is usable before it bends. Lower breaks up
    *  earlier. */
   readonly headroom: number;
+}
+
+/** A push-pull output pair. Two tubes conducting on opposite half-cycles into
+ *  one transformer, summed IN OPPOSITION — which is what cancels the even
+ *  harmonics and leaves the odd ones, and most of why a push-pull amp does not
+ *  sound like a single-ended one. */
+export interface PushPullStage {
+  readonly gainDb: number;
+  /** 0..1. How much of the curve is usable before it bends. Lower breaks up
+   *  earlier. */
+  readonly headroom: number;
+  /** 0..1. How unmatched the pair is. 0 cancels every even harmonic, which no
+   *  real pair does. A FINE TRIM, not a character control: at 0.08 the second
+   *  harmonic sits about 62 dB below the third. */
+  readonly imbalance: number;
+}
+
+/**
+ * Two volume pots whose wipers tie to ONE node at the next stage's grid.
+ *
+ * The 5E3's jumper interaction and its "coupled tone" behaviour are the same
+ * mechanism seen twice. `coupledChannelGains` in `circuit-math.ts` carries the
+ * shape and the warning that goes with it — the loading is NOT monotonic in
+ * either pot.
+ */
+export interface SharedNodeCoupling {
+  /** 0..1. How hard the two volume pots load each other. 0 = independent. */
+  readonly loadingStrength: number;
+  /** Hz at both pots down / both pots up — what the tone network sees. */
+  readonly minCornerHz: number;
+  readonly maxCornerHz: number;
+  /** 0..1. The bright channel's treble bypass at pot minimum. */
+  readonly brightCapDepth: number;
+  /** Hz. Where that bypass starts lifting. */
+  readonly brightCapCornerHz: number;
+}
+
+/** A cathodyne (split-load) phase inverter — one triode producing two
+ *  opposed outputs, one off the plate and one off the cathode. */
+export interface CathodyneInverter {
+  readonly stage: TriodeStage;
+  /** Hz. The PLATE leg's ceiling at full spread. The plate is the
+   *  HIGH-IMPEDANCE output — roughly the anode resistor, tens of kΩ, against
+   *  the cathode leg's `Rk ‖ 1/gm` of a few hundred Ω — so it rolls off FIRST
+   *  and this is the LOWER of the two corners. The cathode leg uses
+   *  `stage.millerLpfHz`. Getting the direction backwards is the easy mistake
+   *  and the first draft of this plan made it. */
+  readonly plateLegLpfHz: number;
+  /** 0..1. How far toward `plateLegLpfHz` the plate leg is actually taken,
+   *  logarithmically. At 0 the legs match and the split provably reduces to
+   *  one composed curve — the ONLY reason the renderer builds a real split is
+   *  that at anything above 0 they do not. This one number carries the whole
+   *  difference. */
+  readonly legSpread: number;
 }
 
 /**
@@ -121,7 +184,12 @@ export interface OutputTransformer {
  * tuning one is a single-line data edit rather than a change to a renderer.
  * If an amp sounds wrong, the number is what moves — never the renderer.
  */
-export interface CircuitAmpCircuit {
+export type CircuitTopology = 'single-ended' | 'push-pull-dual-channel';
+
+/** One preamp chain into a single-ended output stage. No phase splitter, so
+ *  nothing cancels the even harmonics — the asymmetry is the sound. */
+export interface SingleEndedCircuit {
+  readonly topology: 'single-ended';
   readonly triode1: TriodeStage;
   readonly triode2: TriodeStage;
   readonly tone: ToneNetwork;
@@ -129,6 +197,25 @@ export interface CircuitAmpCircuit {
   readonly supply: Supply;
   readonly transformer: OutputTransformer;
 }
+
+/** Two input channels summing at one wiper-tied node, then a shared second
+ *  stage, a cathodyne inverter and a push-pull pair. Not a serial chain with
+ *  more boxes in it — the shared node is what makes the two channels interact,
+ *  and `coupling` is where that lives. */
+export interface PushPullDualChannelCircuit {
+  readonly topology: 'push-pull-dual-channel';
+  readonly channelNormal: TriodeStage;
+  readonly channelBright: TriodeStage;
+  readonly coupling: SharedNodeCoupling;
+  readonly triode2: TriodeStage;
+  readonly tone: ToneNetwork;
+  readonly phaseInverter: CathodyneInverter;
+  readonly power: PushPullStage;
+  readonly supply: Supply;
+  readonly transformer: OutputTransformer;
+}
+
+export type CircuitAmpCircuit = SingleEndedCircuit | PushPullDualChannelCircuit;
 
 export interface CircuitAmp {
   readonly id: string;

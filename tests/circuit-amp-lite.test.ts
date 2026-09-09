@@ -119,27 +119,27 @@ function targetsOf(node: unknown): string[] {
 describe('buildCircuitAmpLite — topology', () => {
   it('runs the signal through both triodes in series', () => {
     const nodes = buildCircuitAmpLite(params(), AMP);
-    expect(targetsOf(nodes.triode1Gain)).toContain(tagOf(nodes.triode1Shaper));
-    expect(targetsOf(nodes.triode2Gain)).toContain(tagOf(nodes.triode2Shaper));
-    expect(targetsOf(nodes.toneFilter)).toContain(tagOf(nodes.triode2Gain));
+    expect(targetsOf(nodes.triode1.gain)).toContain(tagOf(nodes.triode1.shaper));
+    expect(targetsOf(nodes.triode2.gain)).toContain(tagOf(nodes.triode2.shaper));
+    expect(targetsOf(nodes.toneFilter)).toContain(tagOf(nodes.triode2.gain));
     disposeCircuitAmpLite(nodes);
   });
 
   it('puts Volume between the first triode and the tone network, not in front of the amp', () => {
     const nodes = buildCircuitAmpLite(params(), AMP);
-    expect(targetsOf(nodes.triode1Miller)).toContain(tagOf(nodes.volumeGain));
+    expect(targetsOf(nodes.triode1.miller)).toContain(tagOf(nodes.volumeGain));
     expect(targetsOf(nodes.volumeGain)).toContain(tagOf(nodes.toneFilter));
     expect(targetsOf(nodes.inputGain)).not.toContain(tagOf(nodes.toneFilter));
-    expect(targetsOf(nodes.inputGain)).toContain(tagOf(nodes.triode1Gain));
+    expect(targetsOf(nodes.inputGain)).toContain(tagOf(nodes.triode1.gain));
     disposeCircuitAmpLite(nodes);
   });
 
   it('feeds the sag path from the signal without putting it in series', () => {
     const nodes = buildCircuitAmpLite(params(), AMP);
-    expect(targetsOf(nodes.triode2Miller)).toContain(tagOf(nodes.sagFollower));
-    expect(targetsOf(nodes.sagFollower)).toContain(tagOf(nodes.sagScale));
+    expect(targetsOf(nodes.triode2.miller)).toContain(tagOf(nodes.supply.follower));
+    expect(targetsOf(nodes.supply.follower)).toContain(tagOf(nodes.supply.scale));
     // Reaches a PARAM, never an audio node.
-    expect(targetsOf(nodes.sagScale)).toEqual(['param']);
+    expect(targetsOf(nodes.supply.scale)).toEqual(['param']);
     disposeCircuitAmpLite(nodes);
   });
 
@@ -148,15 +148,15 @@ describe('buildCircuitAmpLite — topology', () => {
     // value. Starting this at 1 would make it 2 at silence — a silent +6 dB,
     // which is the class of bug this project has already paid for.
     const nodes = buildCircuitAmpLite(params(), AMP);
-    expect(nodes.sagGain.gain.value).toBe(0);
-    expect(scaleRange(nodes.sagScale).min).toBe(1);
-    expect(scaleRange(nodes.sagScale).max).toBeCloseTo(1 - AMP.circuit.supply.sagDepth, 6);
+    expect(nodes.supply.gain.gain.value).toBe(0);
+    expect(scaleRange(nodes.supply.scale).min).toBe(1);
+    expect(scaleRange(nodes.supply.scale).max).toBeCloseTo(1 - AMP.circuit.supply.sagDepth, 6);
     disposeCircuitAmpLite(nodes);
   });
 
   it('takes the supply time constant from the definition', () => {
     const nodes = buildCircuitAmpLite(params(), AMP);
-    expect((nodes.sagFollower as unknown as { smoothing: number }).smoothing).toBe(
+    expect((nodes.supply.follower as unknown as { smoothing: number }).smoothing).toBe(
       AMP.circuit.supply.smoothingSeconds,
     );
     disposeCircuitAmpLite(nodes);
@@ -165,8 +165,77 @@ describe('buildCircuitAmpLite — topology', () => {
   it('exposes the input gain as entry and the transformer as exit', () => {
     const nodes = buildCircuitAmpLite(params(), AMP);
     expect(nodes.entry).toBe(nodes.inputGain);
-    expect(nodes.exit).toBe(nodes.transformerHf);
+    expect(nodes.exit).toBe(nodes.transformer.hf);
     disposeCircuitAmpLite(nodes);
+  });
+
+  // ⚠ THE SAFETY PROPERTY OF THE TOPOLOGY REFACTOR. The Princeton's graph must
+  // survive the union and the stage-builder extraction. Named by ROLE and
+  // compared as a SET, so a builder that wires its internals in a different
+  // order still passes while a genuinely different graph does not.
+  it('builds the same graph for the Princeton after the topology split', () => {
+    hoisted.connections.length = 0;
+    const n = buildCircuitAmpLite(
+      {
+        enabled: true,
+        ampId: 'princeton-5f2a',
+        inputGainDb: 0,
+        controls: { volume: 0.5, tone: 0.5 },
+      },
+      AMP,
+    );
+    if (n.topology !== 'single-ended') throw new Error('the Princeton is single-ended');
+
+    const roles = new Map<string, string>([
+      [tagOf(n.inputGain), 'inputGain'],
+      [tagOf(n.triode1.gain), 'triode1.gain'],
+      [tagOf(n.triode1.shaper), 'triode1.shaper'],
+      [tagOf(n.triode1.coupling), 'triode1.coupling'],
+      [tagOf(n.triode1.miller), 'triode1.miller'],
+      [tagOf(n.volumeGain), 'volumeGain'],
+      [tagOf(n.toneFilter), 'toneFilter'],
+      [tagOf(n.triode2.gain), 'triode2.gain'],
+      [tagOf(n.triode2.shaper), 'triode2.shaper'],
+      [tagOf(n.triode2.coupling), 'triode2.coupling'],
+      [tagOf(n.triode2.miller), 'triode2.miller'],
+      [tagOf(n.supply.follower), 'supply.follower'],
+      [tagOf(n.supply.scale), 'supply.scale'],
+      [tagOf(n.supply.gain), 'supply.gain'],
+      [tagOf(n.powerGain), 'powerGain'],
+      [tagOf(n.powerShaper), 'powerShaper'],
+      [tagOf(n.transformer.lf), 'transformer.lf'],
+      [tagOf(n.transformer.shaper), 'transformer.shaper'],
+      [tagOf(n.transformer.hf), 'transformer.hf'],
+    ]);
+    const edges = new Set(
+      hoisted.connections.map(([from, to]) => `${roles.get(from) ?? from}->${roles.get(to) ?? to}`),
+    );
+
+    expect(edges).toEqual(
+      new Set([
+        'inputGain->triode1.gain',
+        'triode1.gain->triode1.shaper',
+        'triode1.shaper->triode1.coupling',
+        'triode1.coupling->triode1.miller',
+        'triode1.miller->volumeGain',
+        'volumeGain->toneFilter',
+        'toneFilter->triode2.gain',
+        'triode2.gain->triode2.shaper',
+        'triode2.shaper->triode2.coupling',
+        'triode2.coupling->triode2.miller',
+        'triode2.miller->supply.gain',
+        'supply.gain->powerGain',
+        'powerGain->powerShaper',
+        'powerShaper->transformer.lf',
+        'transformer.lf->transformer.shaper',
+        'transformer.shaper->transformer.hf',
+        // ⚠ THE SIDE CHAIN. Reads the signal, writes a gain PARAM, never in series.
+        'triode2.miller->supply.follower',
+        'supply.follower->supply.scale',
+        'supply.scale->param',
+      ]),
+    );
+    disposeCircuitAmpLite(n);
   });
 });
 
