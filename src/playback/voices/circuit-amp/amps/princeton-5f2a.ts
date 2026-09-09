@@ -39,6 +39,7 @@ export const PRINCETON_5F2A: CircuitAmp = {
     'headroom to speak of — it breaks up early and stays touch-sensitive.',
   controls: [
     {
+      kind: 'pot',
       id: 'volume',
       label: 'Volume',
       min: 0,
@@ -51,6 +52,7 @@ export const PRINCETON_5F2A: CircuitAmp = {
         'is where the breakup comes from, not the input gain.',
     },
     {
+      kind: 'pot',
       id: 'tone',
       label: 'Tone',
       min: 0,

@@ -116,20 +116,40 @@ function controlById(amp: CircuitAmp, controlId: string): CircuitAmpControl | un
   return amp.controls.find((c) => c.id === controlId);
 }
 
-/** A knob's position.
+/** A pot's position.
  *
- *  A control the amp does not declare reads 0, so a stale key left behind by
- *  an amp change cannot reach a node; a declared control whose key is missing
- *  reads its own default, so a half-written preset still builds. */
+ *  A control the amp does not declare, or one it declares as a switch, reads
+ *  0 — so a stale key left behind by an amp change cannot reach a node. A
+ *  declared pot whose key is missing, or stored as the wrong type, reads its
+ *  own default, so a half-written preset still builds. */
 export function controlValue(
   params: CircuitAmpParams,
   amp: CircuitAmp,
   controlId: string,
 ): number {
   const control = controlById(amp, controlId);
-  if (!control) return 0;
+  if (!control || control.kind !== 'pot') return 0;
   const raw = params.controls[controlId];
   return typeof raw === 'number' ? raw : control.default;
+}
+
+/** A switch's position.
+ *
+ *  Same contract as `controlValue`, and an UNRECOGNISED stored value reads the
+ *  declared default rather than reaching an assembler as an unknown arm. The
+ *  pane says so differently — its picker admits the value it does not know
+ *  rather than silently showing the default. */
+export function switchValue(
+  params: CircuitAmpParams,
+  amp: CircuitAmp,
+  controlId: string,
+): string {
+  const control = controlById(amp, controlId);
+  if (!control || control.kind !== 'switch') return '';
+  const raw = params.controls[controlId];
+  return typeof raw === 'string' && control.options.some((o) => o.value === raw)
+    ? raw
+    : control.default;
 }
 
 // ── Stage builders ──────────────────────────────────────────────────────────

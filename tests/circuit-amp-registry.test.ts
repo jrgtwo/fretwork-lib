@@ -13,6 +13,7 @@ import {
   getCircuitAmp,
   DEFAULT_CIRCUIT_AMP_ID,
 } from '../src/playback/voices/circuit-amp/registry';
+import type { CircuitAmpControl } from '../src/playback/voices/circuit-amp/types';
 
 describe('circuit amp registry', () => {
   it('ships the Princeton 5F2-A as the default', () => {
@@ -30,9 +31,29 @@ describe('circuit amp registry', () => {
     expect(ids).toEqual(['volume', 'tone']);
   });
 
-  it('gives every control a default inside its own range', () => {
+  it('gives every amp a unique id', () => {
+    const ids = CIRCUIT_AMPS.map((a) => a.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe('control declarations', () => {
+  // A switch whose default is not one of its own options would fall back to a
+  // value the amp cannot build, silently, at the one moment nobody is looking:
+  // seeding a fresh preset.
+  it('gives every switch a default that is one of its options', () => {
     for (const amp of CIRCUIT_AMPS) {
       for (const control of amp.controls) {
+        if (control.kind !== 'switch') continue;
+        expect(control.options.map((o) => o.value)).toContain(control.default);
+      }
+    }
+  });
+
+  it('gives every pot a default inside its own range', () => {
+    for (const amp of CIRCUIT_AMPS) {
+      for (const control of amp.controls) {
+        if (control.kind !== 'pot') continue;
         expect(control.min).toBeLessThan(control.max);
         expect(control.default).toBeGreaterThanOrEqual(control.min);
         expect(control.default).toBeLessThanOrEqual(control.max);
@@ -40,8 +61,26 @@ describe('circuit amp registry', () => {
     }
   });
 
-  it('gives every amp a unique id', () => {
-    const ids = CIRCUIT_AMPS.map((a) => a.id);
-    expect(new Set(ids).size).toBe(ids.length);
+  // ⚠ `circuitAmpControlPath` does not namespace by amp id, so two amps
+  // declaring one id share ONE schema row — and that row carries a single
+  // range, default and label whichever amp is selected. An amp that needs a
+  // different default needs a different id. This is that decision's tripwire.
+  it('never lets two amps declare one control id with different shapes', () => {
+    const seen = new Map<string, CircuitAmpControl>();
+    for (const amp of CIRCUIT_AMPS) {
+      for (const control of amp.controls) {
+        const prior = seen.get(control.id);
+        if (!prior) {
+          seen.set(control.id, control);
+          continue;
+        }
+        expect(prior.kind).toBe(control.kind);
+        expect(prior.label).toBe(control.label);
+        expect(prior.default).toBe(control.default);
+        if (prior.kind === 'pot' && control.kind === 'pot') {
+          expect([prior.min, prior.max, prior.step]).toEqual([control.min, control.max, control.step]);
+        }
+      }
+    }
   });
 });

@@ -315,11 +315,18 @@ export interface CircuitAmpParams {
    *  down and you get different sounds at the same output level — which is the
    *  point of having both. */
   readonly inputGainDb: number;
-  /** Knob positions, keyed by the ids this amp's definition declares. A
-   *  declared key that is missing uses that control's `default`; a key the amp
-   *  does not declare is ignored, so a stale value left behind by an amp
-   *  change cannot reach a node. */
-  readonly controls: Readonly<Record<string, number>>;
+  /** Control positions, keyed by the ids this amp's definition declares. A
+   *  pot stores a number, a switch stores one of its declared option values.
+   *
+   *  A declared key that is missing uses that control's `default`; a key the
+   *  amp does not declare is ignored, so a stale value left behind by an amp
+   *  change cannot reach a node. A declared key stored as the WRONG TYPE —
+   *  a number where the amp now declares a switch — reads the default too,
+   *  for the same reason: a half-written or out-of-date preset still builds.
+   *
+   *  Read through `controlValue` / `switchValue` in
+   *  `circuit-amp/lite-renderer.ts`, never off this record directly. */
+  readonly controls: Readonly<Record<string, number | string>>;
 }
 
 /** Per-voice algorithmic reverb. Sits in the chain between the amp and the

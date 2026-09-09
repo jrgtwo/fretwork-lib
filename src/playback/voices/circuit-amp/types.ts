@@ -32,20 +32,48 @@
  * `wireChain` do not change again.
  */
 
-/** One knob the amp actually has. */
-export interface CircuitAmpControl {
-  /** Stable id. Becomes the key under `effects.circuitAmp.controls`. */
+interface CircuitAmpControlCommon {
+  /** Stable id. Becomes the key under `effects.circuitAmp.controls`.
+   *
+   *  ⚠ NOT NAMESPACED BY AMP. Two amps declaring one id share ONE schema row,
+   *  which is what keeps a tone pot's position across an amp switch — and it
+   *  means they share that row's label, range and DEFAULT whichever amp is
+   *  selected. An amp that needs a different default needs a different id.
+   *  `tests/circuit-amp-registry.test.ts` enforces it. */
   readonly id: string;
   readonly label: string;
+  /** What this control does in THIS circuit — shown under the control. */
+  readonly description: string;
+}
+
+/** A continuous control: a pot, a slider in the pane. */
+export interface CircuitAmpPot extends CircuitAmpControlCommon {
+  readonly kind: 'pot';
   readonly min: number;
   readonly max: number;
   readonly step: number;
   readonly default: number;
   /** Suffix shown after the value. Omitted for a bare pot position. */
   readonly unit?: string;
-  /** What this knob does in THIS circuit — shown under the control. */
+}
+
+export interface CircuitAmpSwitchOption {
+  readonly value: string;
+  readonly label: string;
   readonly description: string;
 }
+
+/** A control with named positions rather than a range — a channel selector, a
+ *  standby, a rectifier choice. Stored as a STRING, so it cannot be averaged,
+ *  ramped or read as a pot by mistake. */
+export interface CircuitAmpSwitch extends CircuitAmpControlCommon {
+  readonly kind: 'switch';
+  readonly options: readonly CircuitAmpSwitchOption[];
+  readonly default: string;
+}
+
+/** One control the amp actually has. */
+export type CircuitAmpControl = CircuitAmpPot | CircuitAmpSwitch;
 
 /** One 12AX7 half.
  *
