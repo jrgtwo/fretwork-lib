@@ -77,9 +77,34 @@ describe('control declarations', () => {
         expect(prior.kind).toBe(control.kind);
         expect(prior.label).toBe(control.label);
         expect(prior.default).toBe(control.default);
+        // A shared row carries ONE answer about whether it is a mod. Two amps
+        // disagreeing would mark a stock control as modded on one of them.
+        expect(prior.mod ?? false).toBe(control.mod ?? false);
         if (prior.kind === 'pot' && control.kind === 'pot') {
           expect([prior.min, prior.max, prior.step]).toEqual([control.min, control.max, control.step]);
         }
+      }
+    }
+  });
+});
+
+describe('mods', () => {
+  // A mod is a control that is real but not original. The rule it bends — an
+  // amp's controls are the amp's controls — is right, so bending it has to be
+  // DECLARED rather than smuggled in behind a description nobody reads.
+  it('declares the 5E3 inverter as a mod and nothing else', () => {
+    const mods = CIRCUIT_AMPS.flatMap((amp) =>
+      amp.controls.filter((c) => c.mod).map((c) => `${amp.id}.${c.id}`),
+    );
+    expect(mods).toEqual(['deluxe-5e3.inverter']);
+  });
+
+  it('leaves every stock control unmarked rather than marked false', () => {
+    // `mod?: true` — omitted means stock. A literal `false` would be a third
+    // state the pane would have to interpret.
+    for (const amp of CIRCUIT_AMPS) {
+      for (const control of amp.controls) {
+        expect(control.mod === undefined || control.mod === true).toBe(true);
       }
     }
   });

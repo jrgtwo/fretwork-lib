@@ -46,6 +46,21 @@ interface CircuitAmpControlCommon {
   readonly label: string;
   /** What this control does in THIS circuit — shown under the control. */
   readonly description: string;
+  /**
+   * Set when this control is NOT a stock part of the amp.
+   *
+   * The engine's rule is that an amp's controls are the amp's controls, and
+   * that rule is right — but it leaves no home for a control that is real and
+   * legitimate without being original: a bright-cap lift, a tone-stack swap, an
+   * added negative-feedback loop. People mod amps, and a modded amp is still
+   * that amp. So a mod is DECLARED rather than smuggled in, and the pane marks
+   * it, so nobody reads a modded control as something Fender shipped.
+   *
+   * ⚠ A SHARED CONTROL ID MUST AGREE ABOUT THIS, like it must agree about kind,
+   * label and default — one row serves every amp declaring the id, and it
+   * carries one answer. `tests/circuit-amp-registry.test.ts` enforces it.
+   */
+  readonly mod?: true;
 }
 
 /** A continuous control: a pot, a slider in the pane. */
@@ -132,6 +147,24 @@ export interface PushPullStage {
    *  real pair does. A FINE TRIM, not a character control: at 0.08 the second
    *  harmonic sits about 62 dB below the third. */
   readonly imbalance: number;
+}
+
+/**
+ * The Hi/Lo input jacks, as a pad plus the treble loss its divider causes.
+ *
+ * ⚠ IF THE TWO CORNERS ARE EQUAL THIS CONTROL IS `inputGainDb - 6` WEARING A
+ * DIFFERENT NAME, which is exactly why it was deferred to the backlog before
+ * the schematic was read. The Lo jack is a divider made by the two 68 kΩ grid
+ * stoppers, so it pads AND raises the impedance the grid's own capacitance
+ * works against — the darkening is what makes it a separate control.
+ */
+export interface InputPad {
+  /** dB. What the Lo jack drops relative to Hi. About -6. */
+  readonly loPadDb: number;
+  /** Hz. Grid-loading roll-off on the Hi jack. */
+  readonly hiCornerHz: number;
+  /** Hz. The same on Lo, and it is the LOWER of the two. */
+  readonly loCornerHz: number;
 }
 
 /**
@@ -227,11 +260,17 @@ export interface SingleEndedCircuit {
  *  and `coupling` is where that lives. */
 export interface PushPullDualChannelCircuit {
   readonly topology: 'push-pull-dual-channel';
+  readonly inputPad: InputPad;
   readonly channelNormal: TriodeStage;
   readonly channelBright: TriodeStage;
+  /** ⚠ NO SEPARATE `tone` BLOCK, and that is deliberate. On a 5E3 the tone pot
+   *  hangs off the same node as both volume pots and is modelled inside
+   *  `sharedNodeResponse`, so a `ToneNetwork` here would be a second
+   *  declaration of a thing already described — two sources of truth that can
+   *  disagree. `SingleEndedCircuit` keeps its `tone`; a Princeton really does
+   *  have a separate one. */
   readonly coupling: SharedNodeCoupling;
   readonly triode2: TriodeStage;
-  readonly tone: ToneNetwork;
   readonly phaseInverter: CathodyneInverter;
   readonly power: PushPullStage;
   readonly supply: Supply;

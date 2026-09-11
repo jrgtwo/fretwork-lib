@@ -726,6 +726,116 @@ describe('Voice — the level taps report PEAK, not RMS', () => {
   });
 });
 
+describe('Voice.swapPreset — a 5E3 switch is a retune, never a rebuild', () => {
+  /**
+   * ⚠ THE PROPERTY THE WHOLE SWITCH DESIGN RESTS ON. A 5E3's channel selector
+   * gates SIGNAL — it does not take a pot out of the circuit — so flipping it
+   * must move gains on an existing graph. A switch that quietly rebuilt would
+   * cut every ringing note, which is the defect `setTrackVoice`'s release tail
+   * was supposed to cover and does not.
+   *
+   * `sameEffectsShape` is module-private, so this asserts it the way the tests
+   * above do: through `swapPreset`, with a constructor call-counter.
+   */
+  const BASE: Record<string, number | string> = {
+    input: 'hi',
+    bright: 'off',
+    jumpered: 'off',
+    volumeNormal: 0.5,
+    volumeBright: 0.5,
+    tone: 0.5,
+    inverter: 'split',
+  };
+
+  function deluxe(overrides: Record<string, number | string> = {}) {
+    return {
+      ...ELECTRIC_GUITAR_PRESET,
+      effects: {
+        ...ELECTRIC_GUITAR_PRESET.effects,
+        circuitAmp: {
+          ampId: 'deluxe-5e3',
+          inputGainDb: 0,
+          controls: { ...BASE, ...overrides },
+        },
+      },
+    };
+  }
+
+  interface DeluxeNodes {
+    inputPad: { gain: { value: number } };
+    channelNormalFeed: { gain: { value: number } };
+    channelBrightFeed: { gain: { value: number } };
+    plateLegLpf: { frequency: { value: number } };
+    cathodeLegLpf: { frequency: { value: number } };
+  }
+
+  function nodesOf(v: Voice): DeluxeNodes {
+    const chain = (v as unknown as { _chain: { circuitAmp?: DeluxeNodes } })._chain;
+    if (!chain.circuitAmp) throw new Error('no circuit amp in the chain');
+    return chain.circuitAmp;
+  }
+
+  it('flips the channel switches without constructing a node', () => {
+    const v = new Voice(deluxe());
+    v.play('A3', '4n', 0);
+    const built = hoisted.calls.gainCtor;
+
+    v.swapPreset(deluxe({ bright: 'on' }));
+    expect([
+      nodesOf(v).channelNormalFeed.gain.value,
+      nodesOf(v).channelBrightFeed.gain.value,
+    ]).toEqual([0, 1]);
+
+    // Jumpered wins over Bright — both fed, still no rebuild.
+    v.swapPreset(deluxe({ bright: 'on', jumpered: 'on' }));
+    expect([
+      nodesOf(v).channelNormalFeed.gain.value,
+      nodesOf(v).channelBrightFeed.gain.value,
+    ]).toEqual([1, 1]);
+
+    expect(hoisted.calls.gainCtor).toBe(built);
+    v.dispose();
+  });
+
+  it('pads and darkens on the Lo jack without constructing a node', () => {
+    const v = new Voice(deluxe());
+    v.play('A3', '4n', 0);
+    v.swapPreset(deluxe({ input: 'hi' }));
+    const hi = nodesOf(v).inputPad.gain.value;
+    const built = hoisted.calls.gainCtor;
+
+    v.swapPreset(deluxe({ input: 'lo' }));
+
+    expect(nodesOf(v).inputPad.gain.value).toBeLessThan(hi);
+    expect(hoisted.calls.gainCtor).toBe(built);
+    v.dispose();
+  });
+
+  it('flattens the inverter legs without constructing a node', () => {
+    // ⚠ ONLY THE PLATE LEG MOVES, and that is the design: the cathode leg's
+    // corner is the triode's own Miller roll-off, fixed at build time, and
+    // `legSpread` walks the PLATE leg away from it. So this reads the plate
+    // corner across the switch rather than comparing the two nodes — the
+    // Filter mock ignores its constructor options, so the cathode node's
+    // value here is the mock's and not the circuit's.
+    const v = new Voice(deluxe());
+    v.play('A3', '4n', 0);
+
+    v.swapPreset(deluxe({ inverter: 'split' }));
+    const split = Number(nodesOf(v).plateLegLpf.frequency.value);
+    const built = hoisted.calls.gainCtor;
+
+    v.swapPreset(deluxe({ inverter: 'composed' }));
+    const composed = Number(nodesOf(v).plateLegLpf.frequency.value);
+
+    // Split takes the plate leg DOWN from the cathode leg's corner — it is the
+    // high-impedance output and rolls off first.
+    expect(split).toBeLessThan(composed);
+    expect(hoisted.calls.gainCtor).toBe(built);
+    v.dispose();
+  });
+});
+
 describe('Voice.swapPreset — a circuit amp retunes in place', () => {
   /**
    * The circuit amp was wired into the chain BUILDER and never into the update

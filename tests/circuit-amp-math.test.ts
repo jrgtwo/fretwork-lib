@@ -9,6 +9,7 @@
  * comment claimed it left level alone, and no meter in the system could see it.
  */
 import { describe, it, expect } from 'vitest';
+import { harmonic } from './harmonic';
 import {
   triodeCurve,
   powerStageCurve,
@@ -241,24 +242,6 @@ describe('sharedNodeResponse', () => {
 });
 
 describe('pushPullCurve', () => {
-  // Magnitude of the nth harmonic. BOTH quadratures — for any memoryless `f`
-  // driven by `A·sin(t)` the output satisfies `g(π−t) = g(t)`, which forces
-  // every even harmonic's SINE coefficient to zero. A sine-only bin is
-  // therefore blind to exactly the harmonics this describe block is about:
-  // it reads 3.1e-17 on `x => x*x`, whose true h2 is 0.32.
-  const harmonic = (f: (x: number) => number, n: number): number => {
-    const N = 4096;
-    let re = 0;
-    let im = 0;
-    for (let i = 0; i < N; i++) {
-      const t = (2 * Math.PI * i) / N;
-      const y = f(0.8 * Math.sin(t));
-      re += y * Math.cos(n * t);
-      im += y * Math.sin(n * t);
-    }
-    return Math.hypot((2 * re) / N, (2 * im) / N);
-  };
-
   // The reason a push-pull amp does not sound like a Champ: a matched pair
   // cancels the EVEN harmonics and leaves the odd ones.
   it('cancels even harmonics when the pair is matched', () => {

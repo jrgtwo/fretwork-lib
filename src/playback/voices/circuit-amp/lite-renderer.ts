@@ -39,9 +39,13 @@
  */
 import * as Tone from 'tone';
 import type {
+  CathodyneInverter,
   CircuitAmp,
   CircuitAmpControl,
+  InputPad,
   OutputTransformer,
+  PushPullDualChannelCircuit,
+  PushPullStage,
   SingleEndedCircuit,
   Supply,
   TriodeStage,
@@ -53,6 +57,7 @@ import {
   transformerCurve,
   tonePotCutoffHz,
   audioTaper,
+  sharedNodeResponse,
 } from './circuit-math';
 
 /** One 12AX7 half: gain, curve, coupling cap, Miller roll-off. */
@@ -103,10 +108,51 @@ export interface SingleEndedLiteNodes extends CircuitAmpLiteCommon {
   readonly powerShaper: Tone.WaveShaper;
 }
 
-/** One arm today. `PushPullDualChannelLiteNodes` joins it with the 5E3; the
- *  union lands now because `Voice.ts` consumes this type and the narrowing has
- *  to be in place while there is still only one thing to narrow to. */
-export type CircuitAmpLiteNodes = SingleEndedLiteNodes;
+export interface PushPullDualChannelLiteNodes extends CircuitAmpLiteCommon {
+  readonly topology: 'push-pull-dual-channel';
+  /** The Hi/Lo jack: a pad and the treble loss that comes with it. */
+  readonly inputPad: Tone.Gain;
+  readonly inputPadLpf: Tone.Filter;
+  /** 1 or 0, from the `bright` and `jumpered` switches together. Gates SIGNAL
+   *  only — both volume pots stay in circuit either way, which is the whole
+   *  point of the amp. */
+  readonly channelNormalFeed: Tone.Gain;
+  readonly channelBrightFeed: Tone.Gain;
+  readonly channelNormal: TriodeNodes;
+  readonly channelBright: TriodeNodes;
+  readonly volumeNormal: Tone.Gain;
+  readonly volumeBright: Tone.Gain;
+  /** The .0005 bright cap. A PARALLEL treble-only path from V1b's coupling cap
+   *  into the shared node — NOT a shelf on the Bright channel, and its amount
+   *  tracks the TONE pot rather than the Bright volume. */
+  readonly brightInjectHpf: Tone.Filter;
+  readonly brightInjectGain: Tone.Gain;
+  /** V2a's grid: where both channels and the bright injection sum. */
+  readonly sharedNode: Tone.Gain;
+  /** The tone network, as the first-order SHELF it is: a direct path at
+   *  `tonePlateau` summed with a lowpass carrying `1 - tonePlateau`. One biquad
+   *  cannot do this — the pole and zero can sit nine octaves apart. */
+  readonly tonePlateauGain: Tone.Gain;
+  readonly toneLpf: Tone.Filter;
+  readonly toneRestGain: Tone.Gain;
+  readonly toneSum: Tone.Gain;
+  readonly triode2: TriodeNodes;
+  readonly phaseInverter: TriodeNodes;
+  readonly legPlate: Tone.Gain;
+  readonly legCathode: Tone.Gain;
+  readonly plateLegLpf: Tone.Filter;
+  readonly cathodeLegLpf: Tone.Filter;
+  readonly plateShaper: Tone.WaveShaper;
+  readonly cathodeShaper: Tone.WaveShaper;
+  readonly plateSum: Tone.Gain;
+  readonly cathodeSum: Tone.Gain;
+}
+
+export type CircuitAmpLiteNodes = SingleEndedLiteNodes | PushPullDualChannelLiteNodes;
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
 
 function dbToGain(db: number): number {
   return Math.pow(10, db / 20);
@@ -222,6 +268,93 @@ export function disposeTransformer(nodes: TransformerNodes): void {
   nodes.hf.dispose();
 }
 
+// ── The cathodyne, as arithmetic ────────────────────────────────────────────
+
+/** The inverter's two legs, plus the pure arithmetic they implement — so the
+ *  split can be measured against `pushPullCurve` with no audio context. */
+export interface PhaseInverterLegs {
+  /** The plate leg's WaveShaper table. */
+  readonly plateCurve: (x: number) => number;
+  /** The cathode leg's WaveShaper table. Its input arrives ALREADY inverted by
+   *  `legCathode`, which is why this is not a mirror of `plateCurve`. */
+  readonly cathodeCurve: (x: number) => number;
+  /** The summing node's output for a stage input of `x`, with the cathodyne's
+   *  inversion and the transformer's opposition both applied —
+   *  `plateCurve(x) - cathodeCurve(-x)`. Pure JS: it does NOT model Web Audio's
+   *  ±1 input clamp, so it proves the ARITHMETIC and not the graph. */
+  readonly summedCurveAt: (x: number) => number;
+}
+
+/**
+ * The two 6V6 halves, as the two curve tables the split path needs.
+ *
+ * Composed, these ARE `pushPullCurve` — the test that says so is what justifies
+ * building a split at all. The split earns its place only through the legs'
+ * different pre-shaper FILTERS, which no single curve can express.
+ *
+ * ⚠ `k = 1/headroom` LIVES INSIDE BOTH TABLES, not in a gain in front of them.
+ * With `k` in a gain the legs would meet Web Audio's ±1 input clamp at half the
+ * drive the composed shaper does, and the two paths would diverge by over a dB
+ * at the shipped operating point.
+ */
+export function buildPhaseInverterLegs(
+  inverter: CathodyneInverter,
+  power: PushPullStage,
+): PhaseInverterLegs {
+  const tube = triodeCurve(inverter.stage.asymmetry);
+  const k = 1 / Math.max(0.05, clamp01(power.headroom));
+  const m = 1 + clamp01(power.imbalance);
+  const slope = k * (1 + m);
+
+  const plateCurve = (x: number) => tube(x * k) / slope;
+  const cathodeCurve = (x: number) => tube(x * k * m) / slope;
+  return {
+    plateCurve,
+    cathodeCurve,
+    summedCurveAt: (x) => plateCurve(x) - cathodeCurve(-x),
+  };
+}
+
+/**
+ * The plate leg's roll-off, interpolated logarithmically from the cathode
+ * leg's corner at `legSpread` 0 to `plateLegLpfHz` at 1.
+ *
+ * ⚠ The PLATE leg is the DARK one. It is the high-impedance output — roughly
+ * the anode resistor against the cathode leg's `Rk ‖ 1/gm` — so it rolls off
+ * first and its corner is the LOWER of the two. Both legs are loaded equally on
+ * a 5E3 (56 kΩ plate, 56 kΩ tail), so source impedance is the whole of the
+ * difference.
+ */
+export function plateLegCornerHz(inverter: CathodyneInverter, legSpread: number): number {
+  const from = inverter.stage.millerLpfHz;
+  return from * Math.pow(inverter.plateLegLpfHz / from, clamp01(legSpread));
+}
+
+/** Which channels receive signal. ⚠ `jumpered` WINS: with it on both are fed
+ *  whatever `bright` says, which is what a patch cable does. */
+function channelFeeds(params: CircuitAmpParams, amp: CircuitAmp): {
+  normal: number;
+  bright: number;
+} {
+  if (switchValue(params, amp, 'jumpered') === 'on') return { normal: 1, bright: 1 };
+  const bright = switchValue(params, amp, 'bright') === 'on';
+  return { normal: bright ? 0 : 1, bright: bright ? 1 : 0 };
+}
+
+/** The Hi/Lo jack. The pad alone would be `inputGainDb - 6`; the corner is what
+ *  makes it a control of its own. */
+function inputPadFor(
+  params: CircuitAmpParams,
+  amp: CircuitAmp,
+  pad: InputPad,
+): { gain: number; cornerHz: number } {
+  const lo = switchValue(params, amp, 'input') === 'lo';
+  return {
+    gain: lo ? dbToGain(pad.loPadDb) : 1,
+    cornerHz: lo ? pad.loCornerHz : pad.hiCornerHz,
+  };
+}
+
 // ── Assemblers, one per topology ────────────────────────────────────────────
 
 function assembleSingleEnded(
@@ -280,6 +413,168 @@ function assembleSingleEnded(
   };
 }
 
+
+function assemblePushPullDualChannel(
+  params: CircuitAmpParams,
+  amp: CircuitAmp,
+  c: PushPullDualChannelCircuit,
+): PushPullDualChannelLiteNodes {
+  const inputGain = new Tone.Gain(dbToGain(params.inputGainDb));
+
+  const pad = inputPadFor(params, amp, c.inputPad);
+  const inputPad = new Tone.Gain(pad.gain);
+  const inputPadLpf = new Tone.Filter({ type: 'lowpass', frequency: pad.cornerHz });
+
+  const feeds = channelFeeds(params, amp);
+  const channelNormalFeed = new Tone.Gain(feeds.normal);
+  const channelBrightFeed = new Tone.Gain(feeds.bright);
+
+  const channelNormal = buildTriode(c.channelNormal);
+  const channelBright = buildTriode(c.channelBright);
+
+  // ⚠ ONE CALL FOR FIVE NODES. Both volumes, the tone shelf and the bright
+  // injection are one network on this amp — see `sharedNodeResponse`.
+  const r = sharedNodeResponse(
+    controlValue(params, amp, 'volumeNormal'),
+    controlValue(params, amp, 'volumeBright'),
+    controlValue(params, amp, 'tone'),
+    c.coupling,
+  );
+
+  const volumeNormal = new Tone.Gain(r.normal);
+  const volumeBright = new Tone.Gain(r.bright);
+  const brightInjectHpf = new Tone.Filter({ type: 'highpass', frequency: r.brightCornerHz });
+  const brightInjectGain = new Tone.Gain(r.brightInjection);
+  const sharedNode = new Tone.Gain(1);
+
+  const tonePlateauGain = new Tone.Gain(r.tonePlateau);
+  const toneLpf = new Tone.Filter({ type: 'lowpass', frequency: r.toneCornerHz });
+  const toneRestGain = new Tone.Gain(1 - r.tonePlateau);
+  const toneSum = new Tone.Gain(1);
+
+  const triode2 = buildTriode(c.triode2);
+  const phaseInverter = buildTriode(c.phaseInverter.stage);
+
+  const legs = buildPhaseInverterLegs(c.phaseInverter, c.power);
+  const legPlate = new Tone.Gain(1);
+  const legCathode = new Tone.Gain(-1);
+  const plateLegLpf = new Tone.Filter({
+    type: 'lowpass',
+    frequency: plateLegCornerHz(c.phaseInverter, legSpreadFor(params, amp, c)),
+  });
+  const cathodeLegLpf = new Tone.Filter({
+    type: 'lowpass',
+    frequency: c.phaseInverter.stage.millerLpfHz,
+  });
+  const plateShaper = new Tone.WaveShaper(legs.plateCurve, 4096);
+  const cathodeShaper = new Tone.WaveShaper(legs.cathodeCurve, 4096);
+  const plateSum = new Tone.Gain(1);
+  const cathodeSum = new Tone.Gain(-1);
+
+  const supply = buildSupply(c.supply);
+  const powerGain = new Tone.Gain(dbToGain(c.power.gainDb));
+  const transformer = buildTransformer(c.transformer);
+
+  // The fork: one input, two channel triodes.
+  inputGain.connect(inputPad);
+  inputPad.connect(inputPadLpf);
+  inputPadLpf.connect(channelNormalFeed);
+  inputPadLpf.connect(channelBrightFeed);
+  channelNormalFeed.connect(channelNormal.entry);
+  channelBrightFeed.connect(channelBright.entry);
+
+  // Into the shared node — V2a's grid. Three edges: both volume pots, and the
+  // bright cap's path AROUND the Bright pot, tapped at the channel's exit.
+  channelNormal.exit.connect(volumeNormal);
+  channelBright.exit.connect(volumeBright);
+  channelBright.exit.connect(brightInjectHpf);
+  brightInjectHpf.connect(brightInjectGain);
+  volumeNormal.connect(sharedNode);
+  volumeBright.connect(sharedNode);
+  brightInjectGain.connect(sharedNode);
+
+  // The tone network, as a first-order shelf: flat below the corner, falling to
+  // `tonePlateau` above it. A lone lowpass would kill everything with the tone
+  // up, where the corner falls below the audible band.
+  sharedNode.connect(tonePlateauGain);
+  sharedNode.connect(toneLpf);
+  toneLpf.connect(toneRestGain);
+  tonePlateauGain.connect(toneSum);
+  toneRestGain.connect(toneSum);
+
+  toneSum.connect(triode2.entry);
+  triode2.exit.connect(phaseInverter.entry);
+
+  // The cathodyne, and THREE sign flips. The split is anti-phase, each tube
+  // shapes, and the transformer's opposed windings re-invert one leg on the way
+  // in. Drop that third flip and the stage sums instead of opposing — it would
+  // cancel the odd harmonics and keep the even ones, exactly backwards.
+  phaseInverter.exit.connect(legPlate);
+  phaseInverter.exit.connect(legCathode);
+  legPlate.connect(plateLegLpf);
+  legCathode.connect(cathodeLegLpf);
+  plateLegLpf.connect(plateShaper);
+  cathodeLegLpf.connect(cathodeShaper);
+  plateShaper.connect(plateSum);
+  cathodeShaper.connect(cathodeSum);
+  plateSum.connect(supply.gain);
+  cathodeSum.connect(supply.gain);
+
+  supply.gain.connect(powerGain);
+  powerGain.connect(transformer.entry);
+
+  // Side chain — reads the signal, writes a gain PARAM. Never in series. It
+  // taps the last single-signal node before the power stage, NOT the shared
+  // node, which sits behind the volume pots and would make sagDepth mean
+  // nothing at a low volume setting.
+  phaseInverter.exit.connect(supply.follower);
+
+  return {
+    topology: 'push-pull-dual-channel',
+    inputGain,
+    inputPad,
+    inputPadLpf,
+    channelNormalFeed,
+    channelBrightFeed,
+    channelNormal,
+    channelBright,
+    volumeNormal,
+    volumeBright,
+    brightInjectHpf,
+    brightInjectGain,
+    sharedNode,
+    tonePlateauGain,
+    toneLpf,
+    toneRestGain,
+    toneSum,
+    triode2,
+    phaseInverter,
+    legPlate,
+    legCathode,
+    plateLegLpf,
+    cathodeLegLpf,
+    plateShaper,
+    cathodeShaper,
+    plateSum,
+    cathodeSum,
+    supply,
+    powerGain,
+    transformer,
+    entry: inputGain,
+    exit: transformer.exit,
+  };
+}
+
+/** ⚠ EVALUATION CONTROL. `composed` flattens the legs so the split provably
+ *  reduces to one shaper; it is not a 5E3 part and closes at milestone 6. */
+function legSpreadFor(
+  params: CircuitAmpParams,
+  amp: CircuitAmp,
+  c: PushPullDualChannelCircuit,
+): number {
+  return switchValue(params, amp, 'inverter') === 'composed' ? 0 : c.phaseInverter.legSpread;
+}
+
 export function buildCircuitAmpLite(
   params: CircuitAmpParams,
   amp: CircuitAmp,
@@ -288,8 +583,8 @@ export function buildCircuitAmpLite(
   switch (c.topology) {
     case 'single-ended':
       return assembleSingleEnded(params, amp, c);
-    default:
-      throw new Error(`circuit-amp: no lite assembler for topology '${c.topology}'`);
+    case 'push-pull-dual-channel':
+      return assemblePushPullDualChannel(params, amp, c);
   }
 }
 
@@ -305,14 +600,55 @@ export function applyCircuitAmpLite(
 ): void {
   nodes.inputGain.gain.value = dbToGain(params.inputGainDb);
   switch (nodes.topology) {
-    case 'single-ended':
+    case 'single-ended': {
+      // The nodes and the circuit narrow independently — `nodes.topology` says
+      // nothing to the compiler about `amp.circuit`. They cannot disagree in
+      // practice: the nodes were built from this circuit.
+      const c = amp.circuit;
+      if (c.topology !== 'single-ended') return;
       nodes.volumeGain.gain.value = audioTaper(controlValue(params, amp, 'volume'));
       nodes.toneFilter.frequency.value = tonePotCutoffHz(
         controlValue(params, amp, 'tone'),
-        amp.circuit.tone.minCutoffHz,
-        amp.circuit.tone.maxCutoffHz,
+        c.tone.minCutoffHz,
+        c.tone.maxCutoffHz,
       );
       return;
+    }
+    case 'push-pull-dual-channel': {
+      const c = amp.circuit;
+      if (c.topology !== 'push-pull-dual-channel') return;
+
+      const pad = inputPadFor(params, amp, c.inputPad);
+      nodes.inputPad.gain.value = pad.gain;
+      nodes.inputPadLpf.frequency.value = pad.cornerHz;
+
+      const feeds = channelFeeds(params, amp);
+      nodes.channelNormalFeed.gain.value = feeds.normal;
+      nodes.channelBrightFeed.gain.value = feeds.bright;
+
+      // ⚠ ONE CALL. Both volumes, the tone shelf and the bright injection come
+      // from the same network, so they cannot be retuned independently without
+      // the four of them disagreeing about what the node impedance is.
+      const r = sharedNodeResponse(
+        controlValue(params, amp, 'volumeNormal'),
+        controlValue(params, amp, 'volumeBright'),
+        controlValue(params, amp, 'tone'),
+        c.coupling,
+      );
+      nodes.volumeNormal.gain.value = r.normal;
+      nodes.volumeBright.gain.value = r.bright;
+      nodes.toneLpf.frequency.value = r.toneCornerHz;
+      nodes.tonePlateauGain.gain.value = r.tonePlateau;
+      nodes.toneRestGain.gain.value = 1 - r.tonePlateau;
+      nodes.brightInjectHpf.frequency.value = r.brightCornerHz;
+      nodes.brightInjectGain.gain.value = r.brightInjection;
+
+      nodes.plateLegLpf.frequency.value = plateLegCornerHz(
+        c.phaseInverter,
+        legSpreadFor(params, amp, c),
+      );
+      return;
+    }
   }
 }
 
@@ -328,6 +664,33 @@ export function disposeCircuitAmpLite(nodes: CircuitAmpLiteNodes): void {
       nodes.toneFilter.dispose();
       disposeTriode(nodes.triode2);
       nodes.powerShaper.dispose();
+      return;
+    case 'push-pull-dual-channel':
+      nodes.inputPad.dispose();
+      nodes.inputPadLpf.dispose();
+      nodes.channelNormalFeed.dispose();
+      nodes.channelBrightFeed.dispose();
+      disposeTriode(nodes.channelNormal);
+      disposeTriode(nodes.channelBright);
+      nodes.volumeNormal.dispose();
+      nodes.volumeBright.dispose();
+      nodes.brightInjectHpf.dispose();
+      nodes.brightInjectGain.dispose();
+      nodes.sharedNode.dispose();
+      nodes.tonePlateauGain.dispose();
+      nodes.toneLpf.dispose();
+      nodes.toneRestGain.dispose();
+      nodes.toneSum.dispose();
+      disposeTriode(nodes.triode2);
+      disposeTriode(nodes.phaseInverter);
+      nodes.legPlate.dispose();
+      nodes.legCathode.dispose();
+      nodes.plateLegLpf.dispose();
+      nodes.cathodeLegLpf.dispose();
+      nodes.plateShaper.dispose();
+      nodes.cathodeShaper.dispose();
+      nodes.plateSum.dispose();
+      nodes.cathodeSum.dispose();
       return;
   }
 }

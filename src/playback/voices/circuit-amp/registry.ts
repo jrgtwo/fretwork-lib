@@ -1,7 +1,8 @@
 import type { CircuitAmp } from './types';
 import { PRINCETON_5F2A } from './amps/princeton-5f2a';
+import { DELUXE_5E3 } from './amps/deluxe-5e3';
 
-export const CIRCUIT_AMPS: readonly CircuitAmp[] = [PRINCETON_5F2A];
+export const CIRCUIT_AMPS: readonly CircuitAmp[] = [PRINCETON_5F2A, DELUXE_5E3];
 
 export const DEFAULT_CIRCUIT_AMP_ID = 'princeton-5f2a';
 
