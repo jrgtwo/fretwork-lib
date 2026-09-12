@@ -31,6 +31,12 @@ export {
 } from './sample-packs';
 export type { SamplePack } from './sample-packs';
 
+// `sample-store` is deliberately NOT re-exported. It is lib-internal —
+// `sample-packs` imports it by path, `Voice` will — and its dev counter reaches
+// a browser through the module's own `window` handle, not an export. Neither
+// `playback/index.ts` nor `src/index.ts` propagates this barrel wholesale, so
+// an entry here would be public API with no public.
+
 // Experimental circuit-modelled amps. Additive: the five models in
 // `amp-models.ts` and everything using them are untouched.
 export {

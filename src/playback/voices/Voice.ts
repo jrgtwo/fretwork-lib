@@ -28,6 +28,12 @@
  * `updateEffects()`. Adding or removing a chain node (e.g. enabling the
  * compressor for the first time) triggers a chain rebuild so the new node can
  * be inserted at the correct position.
+ *
+ * Samples: every `Tone.Sampler` and the cabinet `Convolver` here are built
+ * EMPTY and filled from `sample-store`, because the store is async and
+ * `_ensureBuilt` is not. That has consequences a reader has to know about
+ * before touching anything below — they are written up at "Sample fills",
+ * immediately above the class.
  */
 import * as Tone from 'tone';
 import type {
@@ -54,6 +60,7 @@ import type {
   VoiceSource,
 } from './types';
 import { NotesBus } from './NotesBus';
+import { loadAudioBuffer } from './sample-store';
 import { getAmpModel } from './amp-models';
 import { getCircuitAmp } from './circuit-amp/registry';
 import {
@@ -195,6 +202,293 @@ interface ChainNodes {
 
 type SynthNode = Tone.PluckSynth | Tone.FMSynth | Tone.Sampler;
 
+// ─── Sample fills ───────────────────────────────────────────────────────────
+//
+// `_ensureBuilt` is SYNCHRONOUS and `sample-store` is not, so every
+// `Tone.Sampler` below is constructed EMPTY — `urls: {}`, which Tone skips
+// without throwing — and filled with `add()` as buffers arrive. The cabinet
+// `Convolver` is built with no `url` and gets its `.buffer` the same way.
+//
+// That is what buys the store, and therefore "a sample file is fetched once,
+// ever". It costs three things, and each one is paid for explicitly here
+// because none of them fails loudly:
+//
+//  1. `Tone.loaded()` stops being true by accident. It drains
+//     `ToneAudioBuffer.downloads` and nothing else, and a buffer handed to
+//     `Sampler.add()` already decoded never lands there. Nothing on the
+//     playback path awaits `Voice.ready()` — `MultiTrackPlayback` and
+//     `EventScheduler` call `ensureBuilt()`, and `Metronome.start()` awaits the
+//     `onBeforeStart` warms and then `Tone.loaded()`. So `registerDownload` is
+//     the thing that keeps the transport from starting against empty samplers.
+//     It holds it for at most `SAMPLE_FILL_GATE_MS`, because an unbounded gate
+//     against a rate-limiting origin is a Play button that does nothing for a
+//     minute and a half.
+//  2. An empty Sampler does not fall silent, it REPITCHES. `_findClosest`
+//     searches ±96 semitones, so mid-fill an E2 triggered against a lone
+//     resident C6 plays at eight octaves of rate — loud, wrong, nothing thrown.
+//     `canSound` is what keeps that window silent, which is what a sample the
+//     origin refused sounded like before this change. The window is not always
+//     a window: a file that never arrives leaves the guard on for good, which
+//     is deliberate — silence for one pitch is what that always sounded like.
+//  3. A fill outlives the synchronous build that started it, so it can land on
+//     a node that has since been disposed. `Sampler.add` on a disposed instance
+//     does NOT throw: it decodes quietly into a cleared map and pins the PCM
+//     alive. Hence the generation guards, `Voice._guard`.
+
+/** What has actually landed in one Sampler. */
+interface SamplerFill {
+  /** The notes the bank NAMES — what this Sampler holds once filled. */
+  readonly mapped: readonly string[];
+  /** `mapped` as MIDI numbers, resolved ONCE here rather than per trigger.
+   *  `canSound` runs on the scheduler's lookahead path and `Tone.Frequency`
+   *  allocates an object per call; a 45-note bank across four banks was ~180
+   *  of them per scheduled note. Keys Tone cannot read as a pitch are dropped,
+   *  exactly as the old per-trigger scan skipped them. */
+  readonly mappedMidi: readonly number[];
+  /** The notes whose buffer has arrived and been added. */
+  readonly resident: Set<string>;
+  /** `resident` as MIDI numbers — same reason as `mappedMidi`. */
+  readonly residentMidi: Set<number>;
+}
+
+/** A fill is finished when every note it named is resident. Deliberately NOT a
+ *  "the promise settled" flag: a load that FAILED settles too, and a bank that
+ *  settled holding one file out of forty-five is precisely the case the guard
+ *  below has to keep catching — under the 429 storm this work exists to end,
+ *  waving it through repitches every pitch off that one file, for the life of
+ *  the voice. The steady state is this one comparison. */
+function fillFinished(fill: SamplerFill): boolean {
+  return fill.resident.size === fill.mapped.length;
+}
+
+/** Keyed on the Sampler rather than held on the Voice, because `buildSynth` is
+ *  a free function and the layer path builds one too. Weak so a disposed
+ *  Sampler's bookkeeping goes with it. */
+const samplerFills = new WeakMap<Tone.Sampler, SamplerFill>();
+
+/**
+ * Fill an empty Sampler from the sample store, and make `Tone.loaded()` wait.
+ *
+ * `isCurrent` is the generation guard — see note 3 above.
+ */
+function fillSampler(
+  sampler: Tone.Sampler,
+  urls: Readonly<Record<string, string>>,
+  isCurrent: () => boolean,
+): void {
+  const mapped = Object.keys(urls);
+  const mappedMidi: number[] = [];
+  for (const note of mapped) {
+    const midi = noteToMidi(note);
+    if (midi !== null) mappedMidi.push(midi);
+  }
+  const fill: SamplerFill = {
+    mapped,
+    mappedMidi,
+    resident: new Set<string>(),
+    residentMidi: new Set<number>(),
+  };
+  samplerFills.set(sampler, fill);
+  if (mapped.length === 0) return;
+
+  // `allSettled`, not `all`: one rejected load must not abandon the notes that
+  // would otherwise have landed, and the gate below is only honest if this
+  // settles when the LAST load does rather than when the first one fails.
+  const work = Promise.allSettled(
+    mapped.map(async (note) => {
+      const buffer = await loadAudioBuffer(urls[note]);
+      // Checked after the await, so an abandoned fill still FETCHES and DECODES
+      // everything it asked for and throws the result away — every load was
+      // issued synchronously above, before anything could be disposed. A cost,
+      // not a defect: the hazard the guard exists for is the decoded PCM being
+      // pinned alive inside a disposed Sampler, and that is closed. Skipping the
+      // work itself needs cancellation in the store, which it does not have.
+      if (!isCurrent()) return;
+      // An empty buffer is what the store resolves to when a load failed. Added,
+      // it becomes the NEAREST sample for its neighbours and silences them too;
+      // left out, the neighbours cover for it exactly as they cover a pitch the
+      // pack never sampled.
+      if (!buffer.loaded) return;
+      try {
+        // `add` types its key as `Note | MidiNote`, both string/number literal
+        // unions; a bank's keys are plain strings and Tone validates them at
+        // runtime anyway (hence the catch).
+        sampler.add(note as Tone.Unit.Note, buffer);
+      } catch (err) {
+        // `add` asserts the key is a note or a midi number, and a pack with a bad
+        // key would otherwise fail here with nothing said. `allSettled` above
+        // means the rest of the bank lands either way; this is the report.
+        console.warn(`[fretwork] sampler rejected note ${note}`, err);
+        return;
+      }
+      fill.resident.add(note);
+      const midi = noteToMidi(note);
+      if (midi !== null) fill.residentMidi.add(midi);
+    }),
+  ).then(() => undefined);
+
+  registerDownload(work);
+}
+
+/**
+ * How long a fill may hold `Tone.loaded()` before the transport is allowed to
+ * start without it.
+ *
+ * A gate with no deadline is a frozen Play button. The store retries a refused
+ * URL four times with backoff (~3.5 s of sleeping) inside a six-wide pool, so a
+ * cold 144-file pack against a rate-limiting origin holds `Metronome.start()`
+ * for over a minute — and it holds it AFTER `_isRunning = true`, with nothing in
+ * the console. Browsing three packs in the voice editor stacks their abandoned
+ * fills on the same gate.
+ *
+ * Giving up is safe in a way that waiting forever is not: `canSound` guarantees
+ * a note whose sample has not landed is SKIPPED, so an expired gate degrades to
+ * a silent first bar — what a refused sample sounded like before this change —
+ * rather than to garbage. The fill keeps running and the notes come in behind it.
+ *
+ * Generous on purpose: a legitimate cold pack over a slow connection is ~13 MB
+ * and must not be cut off, because waiting is the better outcome whenever the
+ * loads are actually progressing.
+ */
+export const SAMPLE_FILL_GATE_MS = 20_000;
+
+const warnedOnce = new Set<string>();
+/** One warning per process per cause. Both of these fire on paths that are
+ *  otherwise entirely silent, and a silent gate failure is indistinguishable
+ *  from a slow network. */
+function warnOnce(key: string, message: string): void {
+  if (warnedOnce.has(key)) return;
+  warnedOnce.add(key);
+  console.warn(message);
+}
+
+/** `work`, bounded by `SAMPLE_FILL_GATE_MS` and incapable of rejecting. */
+function gated(work: Promise<void>): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      warnOnce(
+        'gate',
+        `[fretwork] samples still loading after ${SAMPLE_FILL_GATE_MS} ms — ` +
+          'starting without them; notes with no sample yet are skipped, not repitched',
+      );
+      resolve();
+    }, SAMPLE_FILL_GATE_MS);
+    // Under Node a pending timer keeps the process alive, and a test that
+    // deliberately leaves a fill outstanding would hold the runner open for the
+    // whole gate. No-op in a browser, where `setTimeout` returns a number.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    const settle = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    void work.then(settle, settle);
+  });
+}
+
+/**
+ * Make `Tone.loaded()` wait for `work`.
+ *
+ * A deliberate mutation of a Tone global, and it is what keeps every existing
+ * await honest without changing an interface. Two rules, both taken from Tone's
+ * own `ToneAudioBuffer.load` (`ToneAudioBuffer.js:95-108`):
+ *
+ *  - it MUST splice itself out in a `finally`. `loaded()` drains with
+ *    `while (downloads.length) yield downloads[0]`, so a promise that never
+ *    leaves the array makes it spin forever.
+ *  - it MUST NOT reject. `Metronome.start()` awaits `Tone.loaded()` AFTER
+ *    setting itself running, so a rejection throws inside a started transport.
+ *
+ * Both are `gated`'s job. Note the TYPE here: `downloads` is a declared Tone
+ * static (`ToneAudioBuffer.d.ts:142`), so this must be a plain read and not a
+ * cast — a cast would let a rename upstream turn the one load-bearing mechanism
+ * in this file into a silent no-op with the build still green. The runtime
+ * guard stays for mocked-Tone tests, and says so out loud.
+ */
+function registerDownload(work: Promise<void>): void {
+  const downloads: Promise<void>[] | undefined = Tone.ToneAudioBuffer?.downloads;
+  if (!Array.isArray(downloads)) {
+    warnOnce(
+      'downloads',
+      '[fretwork] Tone.ToneAudioBuffer.downloads is missing — sample fills cannot ' +
+        'hold Tone.loaded(), so playback may start before samples land',
+    );
+    return;
+  }
+  const tracked = gated(work);
+  downloads.push(tracked);
+  void tracked.finally(() => {
+    const at = downloads.indexOf(tracked);
+    if (at >= 0) downloads.splice(at, 1);
+  });
+}
+
+/** MIDI number for a Sampler key or a requested note. Bank keys are note names
+ *  ("A3") or MIDI numbers as strings — `Tone.Sampler` accepts both, and the
+ *  packs use both. `null` when it is neither. */
+function noteToMidi(note: string): number | null {
+  const asMidi = Number(note);
+  if (note !== '' && Number.isFinite(asMidi)) return asMidi;
+  try {
+    return Tone.Frequency(note).toMidi();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether this synth can sound `noteName` the way a FILLED one would.
+ *
+ * The test is "has the sample a finished Sampler would have reached for actually
+ * landed" — anything further away is a bigger repitch than this voice would ever
+ * make once loaded, which is note 2's octaves-out garbage. Skipping the trigger
+ * leaves silence instead, which is what a refused sample sounded like before
+ * this change.
+ *
+ * False while a fill is outstanding, and false FOR GOOD for a pitch whose file
+ * never arrives. That second case is the one to resist making go away: a bank
+ * that finished holding one file out of forty-five has "finished" in the sense
+ * that nothing is outstanding, and playing every pitch off that one file is the
+ * failure this exists to prevent, not the recovery from it.
+ */
+function canSound(synth: SynthNode, noteName: string): boolean {
+  if (!(synth instanceof Tone.Sampler)) return true;
+  const fill = samplerFills.get(synth);
+  if (!fill) return true;
+  // The steady state, and the only cost a fully loaded voice pays. Also covers
+  // the empty bank, which names nothing and therefore holds everything it said
+  // it would — `buildSynth` sends those to a PluckSynth anyway.
+  if (fillFinished(fill)) return true;
+  if (fill.resident.size === 0) return false;
+  const midi = noteToMidi(noteName);
+  if (midi === null) return true;
+  // Two integer scans over numbers parsed at fill time. It runs for as long as
+  // a note is missing — which is for good, if its file never arrives — and that
+  // is the point: a permanently absent sample must go on being silence rather
+  // than becoming a four-octave repitch off whatever did land.
+  let nearestMapped = Infinity;
+  for (const mappedMidi of fill.mappedMidi) {
+    const distance = Math.abs(mappedMidi - midi);
+    if (distance < nearestMapped) nearestMapped = distance;
+  }
+  let nearestResident = Infinity;
+  for (const residentMidi of fill.residentMidi) {
+    const distance = Math.abs(residentMidi - midi);
+    if (distance < nearestResident) nearestResident = distance;
+  }
+  return nearestResident <= nearestMapped;
+}
+
+/** Whether this synth holds `noteName`'s OWN sample — the picker's question,
+ *  which is narrower than `canSound`'s and answerable in O(1). Only called for
+ *  a note the bank's URL map names, so "mapped but not yet landed" is exactly
+ *  the false case. */
+function hasResidentSample(synth: SynthNode, noteName: string): boolean {
+  if (!(synth instanceof Tone.Sampler)) return true;
+  const fill = samplerFills.get(synth);
+  if (!fill) return true;
+  return fill.resident.has(noteName);
+}
+
 export class Voice implements GuitarInstrument {
   private _preset: VoicePreset;
   private _synth: SynthNode | null = null;
@@ -243,6 +537,18 @@ export class Voice implements GuitarInstrument {
   /** Set by the multi-track wiring; `_ensureBuilt` connects the chain
    *  exit to this node instead of MasterBus when present. */
   private _customRoutingTarget: Tone.ToneAudioNode | null = null;
+  /** Monotonic build counters — one per group of nodes that is disposed
+   *  independently. A sample fill outlives the synchronous build that started
+   *  it, so every `add()` and every `.buffer =` is gated on the counter its
+   *  build ran under, and a fill whose target has been torn down stops there.
+   *
+   *  THREE rather than one, and that is not tidiness. A single counter
+   *  over-aborts: `updateEffects` rebuilding the chain would cancel the primary
+   *  sampler's fill even though the samplers survive a chain rebuild, leaving a
+   *  live voice permanently half-loaded — silent notes, the exact failure this
+   *  work exists to end. `source` is bumped by `dispose()`, `layer` by
+   *  `_disposeLayer()`, `chain` by `_rebuildChain()` and `dispose()`. */
+  private _generations = { source: 0, layer: 0, chain: 0 };
 
   constructor(preset: VoicePreset, options?: { autoConnectToMaster?: boolean }) {
     this._preset = preset;
@@ -262,10 +568,15 @@ export class Voice implements GuitarInstrument {
   /** Eagerly construct the synth + audio chain. Normally `play()` does this
    *  lazily on first call, but callers that need the chain ready before the
    *  first note (most importantly MultiTrackPlayback wiring per-track
-   *  routing during composition setup) should call this explicitly so any
-   *  sample loads begin immediately instead of waiting for the first
-   *  triggerAttackRelease — otherwise the first few notes fire into an
-   *  unloaded Sampler and play silently. */
+   *  routing during composition setup) should call this explicitly so the
+   *  sample fills start immediately instead of waiting for the first
+   *  triggerAttackRelease.
+   *
+   *  It returns as soon as the graph EXISTS; the samplers are built empty and
+   *  fill behind it. A note triggered inside that window is SKIPPED rather than
+   *  repitched from whatever landed first — see `canSound` — so the cost of not
+   *  waiting is a dropped note, not a wrong one. Anything that does want to
+   *  wait can: the fills gate `Tone.loaded()`, for up to `SAMPLE_FILL_GATE_MS`. */
   ensureBuilt(): void {
     this._ensureBuilt();
   }
@@ -273,21 +584,41 @@ export class Voice implements GuitarInstrument {
   /**
    * Build the graph and resolve once this voice can actually make a sound.
    *
-   * `ensureBuilt()` only *starts* the sampler downloads — it returns immediately, so a
-   * note triggered straight after it fires into an unloaded `Sampler` and plays
-   * silently, with nothing to await and no error raised. `Metronome.start()` avoids
-   * that by awaiting `Tone.loaded()` itself, but any path that doesn't run the
-   * transport — auditioning a voice in an editor, previewing a cell — had no
-   * equivalent.
+   * `ensureBuilt()` only *starts* the fills: the samplers are constructed empty and
+   * each buffer is `add()`ed as `sample-store` resolves it. This awaits them.
    *
-   * Caveat worth knowing: `Tone.loaded()` is global. It resolves when *every* pending
-   * buffer is decoded, not only this voice's, so a second voice loading concurrently
-   * will delay it. That is the same guarantee `Metronome.start()` relies on, and Tone
-   * exposes no per-instrument equivalent.
+   * **This is not what gates playback, and it never was.** Its only two callers are
+   * editor auditions in the app's `playbackService`, which run outside the transport
+   * and so have no gate of their own. The playback path calls `ensureBuilt()`
+   * (`MultiTrackPlayback`, `EventScheduler`) and is held by `Metronome.start()`
+   * awaiting every `onBeforeStart` warm and then `Tone.loaded()`. That await is the
+   * whole "no silent first bar" mechanism, and it still covers the fills only because
+   * each one is registered on `ToneAudioBuffer.downloads` — the one thing
+   * `Tone.loaded()` drains. See `registerDownload`; do not remove it on the grounds
+   * that `ready()` exists.
+   *
+   * Two caveats, and neither is a defect to be fixed here:
+   *
+   * `Tone.loaded()` is global. It resolves when *every* pending buffer is decoded,
+   * not only this voice's, so a second voice loading concurrently will delay it.
+   * That is the same guarantee `Metronome.start()` relies on, and Tone exposes no
+   * per-instrument equivalent.
+   *
+   * And it is BOUNDED. A fill releases the gate after `SAMPLE_FILL_GATE_MS` whether
+   * or not it landed, so this resolving does not prove the samples arrived — only
+   * that they stopped being worth waiting for. What it does still promise is that
+   * nothing plays wrong: a note with no sample resident is skipped (`canSound`).
    */
   async ready(): Promise<void> {
     this._ensureBuilt();
     await Tone.loaded();
+  }
+
+  /** A guard for fills queued against nodes built now — false once whatever
+   *  built them has been disposed. */
+  private _guard(target: 'source' | 'layer' | 'chain'): () => boolean {
+    const builtAt = this._generations[target];
+    return () => this._generations[target] === builtAt;
   }
 
   private _ensureBuilt(): void {
@@ -304,16 +635,25 @@ export class Voice implements GuitarInstrument {
       const samplerSrc = src as VoiceSource & { kind: 'sampler' };
       const nonEmpty = samplerSrc.samples.filter((b) => Object.keys(b).length > 0);
       this._samplerBankUrls = nonEmpty;
-      this._samplerBanks = nonEmpty.map((urls) => new Tone.Sampler({
-        urls: urls as Record<string, string>,
-        release: samplerSrc.release ?? 1,
-        // 5 ms fade-in envelope on every trigger. Smooths the BufferSource
-        // start so any noise-floor wobble or mp3 encoder-delay edge in the
-        // first samples of the decoded buffer doesn't produce an audible
-        // click. 5 ms is below the perceptual threshold for "soft attack" —
-        // real guitar pluck attacks are 5-20 ms anyway.
-        attack: 0.005,
-      }));
+      const sourceGuard = this._guard('source');
+      this._samplerBanks = nonEmpty.map((urls) => {
+        // Built EMPTY and filled from the store — see "Sample fills". The URL
+        // map still goes on `_samplerBankUrls` for the picker, but it is now a
+        // statement of what this bank WILL hold, which is why `_pickBankFor`
+        // also checks what has actually landed.
+        const sampler = new Tone.Sampler({
+          urls: {},
+          release: samplerSrc.release ?? 1,
+          // 5 ms fade-in envelope on every trigger. Smooths the BufferSource
+          // start so any noise-floor wobble or mp3 encoder-delay edge in the
+          // first samples of the decoded buffer doesn't produce an audible
+          // click. 5 ms is below the perceptual threshold for "soft attack" —
+          // real guitar pluck attacks are 5-20 ms anyway.
+          attack: 0.005,
+        });
+        fillSampler(sampler, urls, sourceGuard);
+        return sampler;
+      });
       this._synth = this._samplerBanks[0];
       this._mixer = new Tone.Gain(1);
       // Source calibration (AF-03) — see `levels.ts`. The trim goes on a node of
@@ -328,7 +668,7 @@ export class Voice implements GuitarInstrument {
     } else {
       // Single-synth path: pluck-synth, fm-synth, or sampler with all-empty
       // banks (falls back to a neutral PluckSynth inside `buildSynth`).
-      this._synth = buildSynth(src);
+      this._synth = buildSynth(src, this._guard('source'));
       this._samplerBanks = null;
       this._samplerBankUrls = null;
       this._mixer = new Tone.Gain(1);
@@ -350,7 +690,7 @@ export class Voice implements GuitarInstrument {
     this._mixer.connect(this._vibrato);
     this._vibrato.connect(this._pitchShift);
     this._pitchShift.connect(this._palmMuteFilter);
-    this._chain = buildChain(this._preset);
+    this._chain = buildChain(this._preset, this._guard('chain'));
     this._exit = wireChain(this._palmMuteFilter, this._chain);
     if (this._autoConnectToMaster) {
       NotesBus.connectVoice(this._exit);
@@ -364,7 +704,7 @@ export class Voice implements GuitarInstrument {
 
   private _buildLayer(layer: VoiceLayer): void {
     if (!this._mixer) return;
-    this._layerSynth = buildSynth(layer.source);
+    this._layerSynth = buildSynth(layer.source, this._guard('layer'));
     applyLayerDetune(this._layerSynth, layer.detuneCents);
     // The layer's own source calibration, folded in rather than given a node —
     // `gainDb` is a MIX level relative to the primary and the trim is a fact
@@ -376,6 +716,10 @@ export class Voice implements GuitarInstrument {
   }
 
   private _disposeLayer(): void {
+    // A layer sampler's fill is still in flight; the Sampler it was filling is
+    // about to be a disposed instance. Only the LAYER counter moves — the
+    // primary's fill is untouched by a layer change.
+    this._generations.layer++;
     this._layerSynth?.dispose();
     this._layerGain?.dispose();
     this._layerSynth = null;
@@ -398,6 +742,11 @@ export class Voice implements GuitarInstrument {
   ): void {
     this._ensureBuilt();
     const synth = this._pickBankFor(noteName);
+    // Mid-fill this bank may hold nothing near this pitch yet. Dropping the note
+    // is right: an empty Sampler repitches from whatever landed first rather
+    // than falling silent, and silence is what this sounded like before the
+    // store. Not counted by `noteTriggered` below either — nothing is playing.
+    if (!canSound(synth, noteName)) return;
     const velocity = options?.velocity;
     // Audio-thread instrumentation (no-op when window.__FRETWORK_AUDIO_DEBUG
     // is falsy). Track active note count + release-tail estimate so the
@@ -426,7 +775,13 @@ export class Voice implements GuitarInstrument {
       // Trigger the layer too, transposed by its octave offset.
       if (this._layerSynth && this._preset.layer) {
         const layerNote = transposeNote(noteName, this._preset.layer.octaveOffset * 12);
-        this._layerSynth.triggerAttackRelease(layerNote, duration, audioTime, velocity);
+        // Guarded separately, and not only for the layer's own sake: an unfilled
+        // sampler layer THROWS out of `triggerAttackRelease`, and the catch at
+        // the end of this block would then swallow palm-mute, the pitch curve
+        // and vibrato for a note whose primary sounded fine.
+        if (canSound(this._layerSynth, layerNote)) {
+          this._layerSynth.triggerAttackRelease(layerNote, duration, audioTime, velocity);
+        }
       }
       // Per-note palm-mute. Drop the low-pass filter cutoff to ~600 Hz at
       // note start (instant — palm-mute kicks in immediately) and ramp it
@@ -495,6 +850,13 @@ export class Voice implements GuitarInstrument {
   }
 
   dispose(): void {
+    // Before anything is torn down: every node below is about to become a
+    // dangling target for a fill still in flight. `Sampler.add` on a disposed
+    // instance does not throw — it decodes into a cleared map and pins ~100 MB
+    // of PCM alive — so the counters move FIRST.
+    this._generations.source++;
+    this._generations.layer++;
+    this._generations.chain++;
     if (this._connectedToMaster && this._exit) {
       NotesBus.disconnectVoice(this._exit);
       this._connectedToMaster = false;
@@ -727,17 +1089,23 @@ export class Voice implements GuitarInstrument {
   /** Pick which synth node fires for this note. For non-sampler voices, always
    *  `_synth`. For sampler-kind voices, coverage-aware random-no-repeat:
    *  rotates only among banks whose URL map has an exact-match entry for the
-   *  requested pitch (Tone.Sampler pitch-shifts inside a bank when the exact
-   *  note is missing — distant shifts sound wrong, so we keep rotation within
-   *  the "exact match" pool). Falls back to the full bank pool if no bank has
-   *  the pitch (uniform pitch-shift across all banks then). */
+   *  requested pitch AND has actually received that sample (Tone.Sampler
+   *  pitch-shifts inside a bank when the exact note is missing — distant shifts
+   *  sound wrong, so we keep rotation within the "exact match" pool). Falls back
+   *  to the full bank pool if no bank has the pitch (uniform pitch-shift across
+   *  all banks then), and `play()` decides whether that fallback can sound.
+   *
+   *  The residency half matters only mid-fill, and it matters: `_samplerBankUrls`
+   *  says what a bank will hold once its fill finishes, so trusting it alone
+   *  routes the note to a bank holding nothing while a sibling already has the
+   *  sample. */
   private _pickBankFor(noteName: string): SynthNode {
     if (!this._samplerBanks || !this._samplerBankUrls) return this._synth!;
     const banks = this._samplerBanks;
     const urlMaps = this._samplerBankUrls;
     let pool: number[] = [];
     for (let i = 0; i < urlMaps.length; i++) {
-      if (urlMaps[i][noteName] !== undefined) pool.push(i);
+      if (urlMaps[i][noteName] !== undefined && hasResidentSample(banks[i], noteName)) pool.push(i);
     }
     if (pool.length === 0) pool = banks.map((_, i) => i);
     const n = pool.length;
@@ -776,11 +1144,18 @@ export class Voice implements GuitarInstrument {
     this._vibrato.disconnect();
     this._pitchShift.disconnect();
     this._palmMuteFilter.disconnect();
+    // A cab IR still resolving was started against the chain being disposed
+    // here; without this it would land on the Convolver built below.
+    this._generations.chain++;
     disposeChain(this._chain);
     this._mixer.connect(this._vibrato);
     this._vibrato.connect(this._pitchShift);
     this._pitchShift.connect(this._palmMuteFilter);
-    this._chain = buildChain(this._preset);
+    // Re-arms the cab IR fill under the new generation. It has to be re-armed
+    // rather than reused: `buildChain` is where the fill is registered on
+    // `ToneAudioBuffer.downloads`, so skipping it would let `Tone.loaded()`
+    // resolve early after a retune.
+    this._chain = buildChain(this._preset, this._guard('chain'));
     this._exit = wireChain(this._palmMuteFilter, this._chain);
     if (this._autoConnectToMaster) {
       NotesBus.connectVoice(this._exit);
@@ -892,7 +1267,10 @@ function applyLayerDetune(synth: SynthNode, cents: number): void {
 
 // ─── Build helpers ─────────────────────────────────────────────────────────────
 
-function buildSynth(source: VoiceSource): SynthNode {
+/** `guard` gates the sample fill when this builds a Sampler — see
+ *  "Sample fills". Required rather than optional so a new call site cannot
+ *  quietly get an unguarded fill. */
+function buildSynth(source: VoiceSource, guard: () => boolean): SynthNode {
   if (source.kind === 'pluck-synth') {
     const { attackNoise, dampening, resonance, release } = source.params;
     return new Tone.PluckSynth({ attackNoise, dampening, resonance, release });
@@ -917,15 +1295,20 @@ function buildSynth(source: VoiceSource): SynthNode {
   if (Object.keys(bank0).length === 0) {
     return new Tone.PluckSynth({ attackNoise: 0.5, dampening: 4000, resonance: 0.85, release: 0.5 });
   }
-  return new Tone.Sampler({
-    urls: bank0 as Record<string, string>,
+  // Empty, then filled from the store. Reached by the single-bank primary path
+  // AND by `_buildLayer`, so a sampler LAYER fills the same way.
+  const sampler = new Tone.Sampler({
+    urls: {},
     release: source.release ?? 1,
     attack: 0.005,
   });
+  fillSampler(sampler, bank0, guard);
+  return sampler;
 }
 
 
-function buildChain(preset: VoicePreset): ChainNodes {
+/** `guard` gates the cabinet IR's fill — see "Sample fills". */
+function buildChain(preset: VoicePreset, guard: () => boolean): ChainNodes {
   const nodes: ChainNodes = {};
   if (isStageEnabled(preset.bodyFilter)) {
     nodes.bodyFilter = new Tone.Filter({
@@ -1071,15 +1454,40 @@ function buildChain(preset: VoicePreset): ChainNodes {
     });
   }
   if (isStageEnabled(preset.effects?.cabIR)) {
+    // Built with NO url; the buffer is assigned when the store resolves it.
+    // `Convolver`'s `url` is genuinely optional and its `buffer` setter is real
+    // (`Convolver.js:70-85`).
+    //
     // `normalize: false` applies the IR at its native level. Tone's default
     // normalize divides by the IR's RMS, which sounds drastically quieter
     // for cab IRs (which attenuate high-end). The IR packs we ship are
     // recorded for unnormalized use; per-IR variance is handled by the
     // separate `makeupDb` gain immediately after.
-    nodes.cabIR = new Tone.Convolver({
-      url: preset.effects.cabIR.url,
-      normalize: false,
-    });
+    //
+    // Keep the buffer assignment below a FIRST assignment. The setter recreates the native
+    // ConvolverNode when a buffer is already present and does not re-apply
+    // `normalize`, so swapping an IR in place would silently switch
+    // normalisation back on. An IR change rebuilds the chain instead
+    // (`sameEffectsShape` compares `cabIR.url`).
+    const cabIR = new Tone.Convolver({ normalize: false });
+    nodes.cabIR = cabIR;
+    const cabIRUrl = preset.effects.cabIR.url;
+    // Checked BEFORE the load starts as well as after it lands, so a caller
+    // holding a guard that is already false never reaches the network at all —
+    // see `buildChainNodesForTest`.
+    if (guard()) {
+      registerDownload(
+        loadAudioBuffer(cabIRUrl).then((buffer) => {
+          // A slow IR easily outlives the chain it was started for.
+          if (!guard()) return;
+          // The store resolves to an empty buffer on failure, and assigning one
+          // hands the ConvolverNode a null buffer — the cab stage then passes
+          // nothing at all rather than passing the signal through undarkened.
+          if (!buffer.loaded) return;
+          cabIR.buffer = buffer;
+        }),
+      );
+    }
     nodes.cabIRMakeup = new Tone.Gain(dbToGain(preset.effects.cabIR.makeupDb ?? 0));
   }
   if (isStageEnabled(preset.effects?.finalEq)) {
@@ -1116,7 +1524,12 @@ function buildChain(preset: VoicePreset): ChainNodes {
  *  meters exist — are worth holding and are otherwise reachable only through a
  *  full `play()`. */
 export function buildChainNodesForTest(preset: VoicePreset): ChainNodes {
-  return buildChain(preset);
+  // Already-stale guard, which is what keeps this helper OFF THE NETWORK: there
+  // is no Voice here to own a cabinet IR's fill, and `tests/circuit-amp-chain`
+  // mocks `tone` without mocking `sample-store`, so a preset with a `cabIR`
+  // would otherwise fire a real fetch out of vitest and push onto the real
+  // `ToneAudioBuffer.downloads`. Every other node is built exactly as it ships.
+  return buildChain(preset, () => false);
 }
 
 /** Connect entry node → chain in fixed order. Returns the chain's exit node.

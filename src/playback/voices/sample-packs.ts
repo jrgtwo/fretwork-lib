@@ -43,6 +43,8 @@
  * Conversion: `ffmpeg -i NOTE.wav -codec:a libmp3lame -b:a 128k NOTE.mp3` per file,
  * keep ~14 samples spanning E2 → E6 (every 3 semitones).
  */
+import { warmUrls } from './sample-store';
+
 export interface SamplePack {
   /** Stable id (used to key the UI). */
   readonly id: string;
@@ -296,20 +298,30 @@ export const SAMPLE_PACKS: readonly SamplePack[] = [
   },
 ];
 
-/** Eagerly populate the browser HTTP cache for every URL across all banks of a
- *  sample-bank array. Fire-and-forget: doesn't await, swallows errors. Idempotent
- *  (cached responses are fine). Call when the user picks a voice so the
- *  eventual Tone.Sampler fetch (at first play, possibly in a fresh Voice
- *  instance) hits cache instead of the network. */
+/**
+ * Put every URL across all banks of a sample-bank array on disk, ahead of the
+ * play that needs them. Fire-and-forget: doesn't await, swallows errors.
+ *
+ * This used to fire a bare `fetch` at each URL and discard the result, on the
+ * theory that it warmed the browser's HTTP cache. It did not: Supabase serves
+ * these files with `cache-control: no-cache`, so the browser must revalidate
+ * every time and the "warm" copy costs a 304 — a full request — on every read.
+ * What it reliably did do was 144 unthrottled requests per pack, on every
+ * voice selection, into an origin that answers 429.
+ *
+ * It now routes through the sample store, which gains it Cache Storage (where
+ * `no-cache` has no say), a concurrency pool, 429 backoff, and dedupe against
+ * any load of the same URL already in flight. Warming stops at the bytes and
+ * does not decode.
+ */
 export function prefetchSampleBanks(
   banks: ReadonlyArray<Readonly<Record<string, string>>>,
 ): void {
-  if (typeof fetch === 'undefined') return;
+  const urls: string[] = [];
   for (const bank of banks) {
-    for (const url of Object.values(bank)) {
-      fetch(url).catch(() => {});
-    }
+    for (const url of Object.values(bank)) urls.push(url);
   }
+  warmUrls(urls);
 }
 
 /** Look up a pack by id. Returns undefined if not registered. */
